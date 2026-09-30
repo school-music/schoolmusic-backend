@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Pomelo.EntityFrameworkCore.MySql.Query.Internal;
@@ -12,11 +12,40 @@ using System.Security.Claims;
 public class TracksController : ControllerBase
 {
     private readonly schoolmusicContext _context;
-    public readonly IConfiguration _configuration;
-    public TracksController(schoolmusicContext context, IConfiguration configuration)
+    public TracksController(schoolmusicContext context)
     {
         _context = context;
-        _configuration = configuration;
+    }
+
+    [HttpGet("favourites")]
+    public async Task<IActionResult> GetAllFavourites()
+    {
+        var currentUserId = GetCurrentUserId();
+        if (currentUserId == null)
+        {
+            return Unauthorized(new
+            {
+                Message = "Token JWT niepoprawny"
+            });
+        }
+
+        //var songs = user.Songs; błąd serializacji przez tabele w MysQL
+        var songs = await _context.Users.Where(u => u.Id == currentUserId)
+            .SelectMany(u => u.Songs)
+            .Select(s => new
+            {
+                s.Id,
+                s.SpotifyId,
+                s.Title,
+                s.Cover,
+                s.DurationMs,
+            }).ToListAsync();
+        return Ok(new
+        {
+            Message = "Ulubione utwory użytkownika",
+            Tracks = songs
+        });
+
     }
 
 
@@ -27,10 +56,8 @@ public class TracksController : ControllerBase
     [HttpPost("{id:int}/favourites")]
     public async Task<IActionResult> AddToFavourites(int id)
     {
-        var userIdClaims = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-
-        if(!int.TryParse(userIdClaims, out int userId))
+        var currentUserId = GetCurrentUserId();
+        if (currentUserId == null)
         {
             return Unauthorized(new
             {
@@ -39,7 +66,7 @@ public class TracksController : ControllerBase
         }
 
         var user = await _context.Users.Include(u => u.Songs)
-            .FirstOrDefaultAsync(u => u.Id == userId);
+            .FirstOrDefaultAsync(u => u.Id == currentUserId);
         var song = await _context.Songs.FindAsync(id);
 
         if(song == null)
@@ -47,6 +74,18 @@ public class TracksController : ControllerBase
             // ! tutaj trzeba zrobić podłączenie do spotify web api a później dodać do bazy danych
             // await Songs.Add(song);
             // await _context.SaveChangesAsync();
+            // na razie NotFound
+            return NotFound(new
+            {
+                Message = "Nie znaleziono piosenki (dołącz SPotify API póxniej"
+            });
+        }
+        if(user == null)
+        {
+            return NotFound(new
+            {
+                Message = "Użytkownik nie znaleziony"
+            });
         }
 
         
@@ -69,25 +108,23 @@ public class TracksController : ControllerBase
 
     }
 
-    [HttpPost("/spotify/{spotify_id}/favourites")]
-    public async Task<IActionResult> AddToFavouritesSpotifyId(string spotify_id)
+    [HttpPost("spotify/{spotifyId}/favourites")]
+    public async Task<IActionResult> AddToFavouritesSpotifyId(string spotifyId)
     {
-        int? currentUserId;
-        try
+        var currentUserId = GetCurrentUserId();
+        if (currentUserId == null)
         {
-            currentUserId = GetCurrentUserId();
-        }catch(Exception ex){
-            return Problem(
-                detail: ex.Message,
-                statusCode: StatusCodes.Status400BadRequest,
-                title: "Nieudana autoryzacja"
-            );
+            return Unauthorized(new
+            {
+                Message = "Token JWT niepoprawny"
+            });
         }
-        var user = _context.Users.Include(u => u.Songs)
+        var user = await _context.Users.Include(u => u.Songs)
             .FirstOrDefaultAsync(u => u.Id == currentUserId);
 
         var song = await _context.Songs
-            .FirstOrDefaultAsync(s => s.SpotifyId == spotify_id);
+            .FirstOrDefaultAsync(s => s.SpotifyId == spotifyId);
+
         if(user == null)
         {
             return NotFound(new
@@ -95,7 +132,74 @@ public class TracksController : ControllerBase
                 Message = "Nie znaleziono użytkownika o podanym ID"
             });
         }
+        if(song == null)
+        {
+            return NotFound(new
+            {
+                Message = "Nie znaleziono piosenki o tym ID"
+            });
+        }
+        if (!user.Songs.Contains(song))
+        {
+            user.Songs.Add(song);
+            await _context.SaveChangesAsync();
+            return Ok(new
+            {
+                Message = "Poprawnie dodano do ulubionych"
+            });
+        }
+        else
+        {
+            return Conflict(new
+            {
+                Message = "Piosenka już jest w ulubionych"
+            });
+        }
+    }
 
+    [HttpDelete("favourites/{id}")]
+    public async Task<IActionResult> DeleteFromFavourites(int id)
+    {
+        var currentUserId = GetCurrentUserId();
+        if (currentUserId == null)
+        {
+            return Unauthorized(new
+            {
+                Message = "Token JWT niepoprawny"
+            });
+        }
+
+        var user = await _context.Users.Include(u => u.Songs)
+            .FirstOrDefaultAsync(u => u.Id ==  currentUserId);
+        var song = await _context.Songs.FirstOrDefaultAsync(s => s.Id == id);
+        if(user == null)
+        {
+            return NotFound(new
+            {
+                Message = "Nie znaleziono użytkownika"
+            });
+        }
+        if(song == null)
+        {
+            return NotFound(new
+            {
+                Message = "Nie znaleziono piosenki"
+            });
+        }
+
+        if (!user.Songs.Remove(song))
+        {
+            return NotFound(new
+            {
+                Message = "Piosenka nie znajdowała sie w ulubionych"
+            });
+        }
+        await _context.SaveChangesAsync();
+        return Ok(new
+        {
+            Message = "Pomyślnie usunięto piosenke z ulubionych"
+        });
+        
     }
 
     /// <summary>
@@ -106,6 +210,6 @@ public class TracksController : ControllerBase
     {
         var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                 ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-        return int.TryParse(claim, out int id) ? id : throw new Exception("Błędne id w tokenie JWT");
+        return int.TryParse(claim, out int id) ? id : null;
     }
 }
