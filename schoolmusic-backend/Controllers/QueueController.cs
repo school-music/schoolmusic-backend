@@ -2,8 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
-using System.Security.Claims;
-using System.IdentityModel.Tokens.Jwt;
+using schoolmusic_backend.Extensions;
 using StackExchange.Redis;
 
 namespace schoolmusic_backend.Controllers
@@ -39,7 +38,7 @@ namespace schoolmusic_backend.Controllers
                 return NotFound(new { Message = "Nie znaleziono przerwy o podanym identyfikatorze." });
             }
 
-            int? currentUserId = GetCurrentUserId();
+            int? currentUserId = HttpContext.GetCurrentUserId();
 
             var items = await _context.QueueItems
                 .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
@@ -239,7 +238,7 @@ namespace schoolmusic_backend.Controllers
         [HttpPost("propose")]
         public async Task<IActionResult> ProposeSong([FromBody] ProposeSongDto dto)
         {
-            int? currentUserId = GetCurrentUserId();
+            int? currentUserId = HttpContext.GetCurrentUserId();
             if (currentUserId == null)
             {
                 return Unauthorized(new { Message = "Musisz być zalogowany, aby zgłosić piosenkę." });
@@ -465,7 +464,7 @@ namespace schoolmusic_backend.Controllers
         [HttpPost("vote")]
         public async Task<IActionResult> Vote([FromBody] VoteRequestDto dto)
         {
-            int? currentUserId = GetCurrentUserId();
+            int? currentUserId = HttpContext.GetCurrentUserId();
             if (currentUserId == null)
             {
                 return Unauthorized(new { Message = "Musisz być zalogowany, aby oddać głos." });
@@ -543,7 +542,7 @@ namespace schoolmusic_backend.Controllers
         [HttpDelete("vote/{queueItemId:int}")]
         public async Task<IActionResult> RemoveVote(int queueItemId)
         {
-            int? currentUserId = GetCurrentUserId();
+            int? currentUserId = HttpContext.GetCurrentUserId();
             if (currentUserId == null)
             {
                 return Unauthorized(new { Message = "Musisz być zalogowany, aby cofnąć głos." });
@@ -571,16 +570,10 @@ namespace schoolmusic_backend.Controllers
             return Ok(new
             {
                 Message = "Głos został pomyślnie cofnięty.",
-                queueItemId = queueItemId,
+                queueItemId,
                 votesCount = remainingVotes,
                 hasVoted = false
             });
-        }
-        private int? GetCurrentUserId()
-        {
-            var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                    ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-            return int.TryParse(claim, out int id) ? id : null;
         }
     }
 }
