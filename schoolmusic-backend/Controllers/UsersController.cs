@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using schoolmusic_backend.Models;
@@ -33,8 +33,6 @@ public class UsersController : ControllerBase
         public string name { get; set; } = string.Empty;
         public string password { get; set; } = string.Empty;
     }
-    public record RefreshTokenRequestDto (string refreshToken);
-    public record AuthResponseDto(string accessToken, string refreshToken, string username);
 
     [HttpPost("login")]
     [AllowAnonymous]
@@ -43,21 +41,22 @@ public class UsersController : ControllerBase
         var exisitingUser = await _context.Users.Include(u => u.Rank)
             .FirstOrDefaultAsync(
             u => u.UserLogin == userLoginDto.name);
-        if(!BCrypt.Net.BCrypt.Verify(userLoginDto.password, exisitingUser.UserPassword))
-        {
-            return BadRequest(new
-            {
-                Message = "Błędne hasło"
-            });
-        }
-
-        if(exisitingUser == null)
+        
+        if (exisitingUser == null)
         {
             return Problem(
                 detail: "Błędne hasło i/lub login",
                 statusCode: StatusCodes.Status401Unauthorized,
                 title: "Unauthorized"
             );
+        }
+
+        if (!BCrypt.Net.BCrypt.Verify(userLoginDto.password, exisitingUser.UserPassword))
+        {
+            return BadRequest(new
+            {
+                Message = "Błędne hasło"
+            });
         }
 
         var jwtSettings = _configuration.GetSection("Jwt");
@@ -69,14 +68,14 @@ public class UsersController : ControllerBase
             new Claim(JwtRegisteredClaimNames.Sub, exisitingUser.Id.ToString()), // ! Subject 
             new Claim(JwtRegisteredClaimNames.UniqueName, exisitingUser.UserLogin), // ! nazwa użytkownika
             new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()), // ! JWT ID, czyli identyfikator samego tokenu
-            new Claim(ClaimTypes.Role, exisitingUser.Rank?.RankName ?? "user")
+            new Claim(ClaimTypes.Role, exisitingUser.Rank?.Rank1 ?? "user")
         };
 
         var token = new JwtSecurityToken(
             issuer: jwtSettings["Issuer"],
             audience: jwtSettings["Audience"],
             claims: Claims,
-            expires: DateTime.UtcNow.AddHours(5),
+            expires: DateTime.UtcNow.AddHours(12),
             signingCredentials: credentials
         );
 
@@ -205,21 +204,4 @@ public class UsersController : ControllerBase
             CreatedAt = user.CreatedAt
         });
     }
-
-    /// Caching póxneij na razie trzeba zając sie bazą danych
-    //[HttpPost("refresh-token")]
-    //[Authorize]
-    //public async Task<IActionResult> RefreshToken(
-    //    [FromBody] RefreshTokenRequestDto dto,
-    //    [FromServices] IConnectionMultiplexer redis
-    //    )
-    //{
-    //    if (string.IsNullOrWhiteSpace(dto.refreshToken))
-    //    {
-    //        return BadRequest(new
-    //        {
-    //            Message = "Token odświeżający jest wymagany"
-    //        });
-    //    }   
-    //}
 }

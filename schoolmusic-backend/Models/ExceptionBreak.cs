@@ -3,11 +3,11 @@ using System.Collections.Generic;
 
 namespace schoolmusic_backend.Models;
 
-public partial class ExceptionDay
+public partial class ExceptionBreak
 {
     public int Id { get; set; }
 
-    public DateTime StartAt { get; set; }
+    public DateTime StartsAt { get; set; }
 
     public DateTime? EndsAt { get; set; }
 

@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using NAudio.Wave;
 using Pomelo.EntityFrameworkCore.MySql.Query.Internal;
 using schoolmusic_backend.Models;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using static System.Net.WebRequestMethods;
 
 [Route("api/[controller]")]
 [ApiController]
@@ -201,11 +203,47 @@ public class TracksController : ControllerBase
         });
         
     }
+    [HttpGet("play-song")]
+    [AllowAnonymous]
+    // Testowa funkcja do odtworzenia piosenki na Twoim Windowsie
+    // url https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3
+    public async Task<IActionResult> PlaySong([FromQuery] string url)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            return BadRequest(new
+            {
+                Message = "Brakujący argument url w zapytaniu"
+            });
+        }
 
-    /// <summary>
-    /// Helper function to get current user id from JWT Token
-    /// </summary>
-    /// <returns>Integer or null</returns>
+        try
+        {
+            using (var mf = new MediaFoundationReader(url)) // odtwarzanie z URL
+            using (var wo = new WasapiOut()) // domyślne urządzenie audio
+            {
+                wo.Init(mf);
+                wo.Play();
+
+                // 
+                int sekundy = 0;
+                while (wo.PlaybackState == PlaybackState.Playing && sekundy < 15)
+                {
+                    await Task.Delay(1000);
+                    sekundy++;
+                }
+
+                wo.Stop();
+            }
+
+            return Ok(new { Message = "Test odtwarzania zakończony pomyślnie!" });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     private int? GetCurrentUserId()
     {
         var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value

@@ -6,3 +6,13 @@ services:
       - "8080:8080"
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__redis=redis:6379
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    container_name: schoolmusic-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
