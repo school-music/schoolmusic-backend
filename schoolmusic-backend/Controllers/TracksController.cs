@@ -89,7 +89,7 @@ public class TracksController : ControllerBase
             });
         }
 
-        
+
         if (!user.Songs.Contains(song))
         {
             user.Songs.Add(song);
@@ -200,7 +200,7 @@ public class TracksController : ControllerBase
         {
             Message = "Pomyślnie usunięto piosenke z ulubionych"
         });
-        
+
     }
     [HttpGet("play-song")]
     [AllowAnonymous]
@@ -219,12 +219,12 @@ public class TracksController : ControllerBase
         try
         {
             using (var mf = new MediaFoundationReader(url)) // odtwarzanie z URL
-            using (var wo = new WasapiOut()) // domyślne urządzenie audio
+            using (var wo = new WasapiPlayerBuilder().WithDefaultDeviceStreamRouting().Build()) // domyślne urządzenie audio
             {
                 wo.Init(mf);
                 wo.Play();
 
-                // 
+                //
                 int sekundy = 0;
                 while (wo.PlaybackState == PlaybackState.Playing && sekundy < 15)
                 {
