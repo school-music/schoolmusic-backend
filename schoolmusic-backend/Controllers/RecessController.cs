@@ -2,8 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
-using System.Security.Claims;
-using System.IdentityModel.Tokens.Jwt;
+using schoolmusic_backend.Extensions;
 
 [Route("api/breaks")]
 [ApiController]
@@ -230,7 +229,7 @@ public class RecessController : ControllerBase
     [HttpPost("exceptions")]
     public async Task<IActionResult> CreateExceptionDay([FromBody] CreateExceptionDayDto dto)
     {
-        int userId = GetCurrentUserId() ?? 0;
+        int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await IsAdmin(userId))
         {
             return StatusCode(StatusCodes.Status403Forbidden, new
@@ -271,7 +270,7 @@ public class RecessController : ControllerBase
     [HttpDelete("exceptions/{id:int}")]
     public async Task<IActionResult> DeleteExceptionDay(int id)
     {
-        int userId = GetCurrentUserId() ?? 0;
+        int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await IsAdmin(userId))
         {
             return StatusCode(StatusCodes.Status403Forbidden, new
@@ -318,7 +317,7 @@ public class RecessController : ControllerBase
     [HttpPost("exception-breaks")]
     public async Task<IActionResult> CreateExceptionBreak([FromBody] CreateExceptionBreakDto dto)
     {
-        int userId = GetCurrentUserId() ?? 0;
+        int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await IsAdmin(userId))
         {
             return StatusCode(StatusCodes.Status403Forbidden, new
@@ -359,7 +358,7 @@ public class RecessController : ControllerBase
     [HttpDelete("exception-breaks/{id:int}")]
     public async Task<IActionResult> DeleteExceptionBreak(int id)
     {
-        int userId = GetCurrentUserId() ?? 0;
+        int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await IsAdmin(userId))
         {
             return StatusCode(StatusCodes.Status403Forbidden, new
@@ -388,7 +387,7 @@ public class RecessController : ControllerBase
     [HttpPut("update-break")]
     public async Task<IActionResult> UpdateDefaultBreaks([FromBody] List<UpdateBreakScheduleItemDto> items)
     {
-        int userId = GetCurrentUserId() ?? 0;
+        int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await IsAdmin(userId))
         {
             return StatusCode(StatusCodes.Status403Forbidden, new
@@ -424,13 +423,6 @@ public class RecessController : ControllerBase
         {
             Message = "Rozkład przerw w bazie został zaktualizowany"
         });
-    }
-
-    private int? GetCurrentUserId()
-    {
-        var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-        return int.TryParse(claim, out int id) ? id : null;
     }
 
     private async Task<bool> IsAdmin(int userId)
