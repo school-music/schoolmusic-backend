@@ -60,6 +60,8 @@ namespace schoolmusic_backend.Controllers
         public Task<IActionResult> ApproveSong(int proposalId)
         {
 
+
+            return null;
         }
     }
 }

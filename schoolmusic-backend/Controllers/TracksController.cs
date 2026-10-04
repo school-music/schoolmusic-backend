@@ -4,8 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using NAudio.Wave;
 using Pomelo.EntityFrameworkCore.MySql.Query.Internal;
 using schoolmusic_backend.Models;
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
+using schoolmusic_backend.Extensions;
 using static System.Net.WebRequestMethods;
 
 [Route("api/[controller]")]
@@ -22,7 +21,7 @@ public class TracksController : ControllerBase
     [HttpGet("favourites")]
     public async Task<IActionResult> GetAllFavourites()
     {
-        var currentUserId = GetCurrentUserId();
+        var currentUserId = HttpContext.GetCurrentUserId();
         if (currentUserId == null)
         {
             return Unauthorized(new
@@ -58,7 +57,7 @@ public class TracksController : ControllerBase
     [HttpPost("{id:int}/favourites")]
     public async Task<IActionResult> AddToFavourites(int id)
     {
-        var currentUserId = GetCurrentUserId();
+        var currentUserId = HttpContext.GetCurrentUserId();
         if (currentUserId == null)
         {
             return Unauthorized(new
@@ -90,7 +89,7 @@ public class TracksController : ControllerBase
             });
         }
 
-        
+
         if (!user.Songs.Contains(song))
         {
             user.Songs.Add(song);
@@ -113,7 +112,7 @@ public class TracksController : ControllerBase
     [HttpPost("spotify/{spotifyId}/favourites")]
     public async Task<IActionResult> AddToFavouritesSpotifyId(string spotifyId)
     {
-        var currentUserId = GetCurrentUserId();
+        var currentUserId = HttpContext.GetCurrentUserId();
         if (currentUserId == null)
         {
             return Unauthorized(new
@@ -162,7 +161,7 @@ public class TracksController : ControllerBase
     [HttpDelete("favourites/{id}")]
     public async Task<IActionResult> DeleteFromFavourites(int id)
     {
-        var currentUserId = GetCurrentUserId();
+        var currentUserId = HttpContext.GetCurrentUserId();
         if (currentUserId == null)
         {
             return Unauthorized(new
@@ -201,7 +200,7 @@ public class TracksController : ControllerBase
         {
             Message = "Pomyślnie usunięto piosenke z ulubionych"
         });
-        
+
     }
     [HttpGet("play-song")]
     [AllowAnonymous]
@@ -220,12 +219,12 @@ public class TracksController : ControllerBase
         try
         {
             using (var mf = new MediaFoundationReader(url)) // odtwarzanie z URL
-            using (var wo = new WasapiOut()) // domyślne urządzenie audio
+            using (var wo = new WasapiPlayerBuilder().WithDefaultDeviceStreamRouting().Build()) // domyślne urządzenie audio
             {
                 wo.Init(mf);
                 wo.Play();
 
-                // 
+                //
                 int sekundy = 0;
                 while (wo.PlaybackState == PlaybackState.Playing && sekundy < 15)
                 {
@@ -242,12 +241,5 @@ public class TracksController : ControllerBase
         {
             return StatusCode(500, new { error = ex.Message });
         }
-    }
-
-    private int? GetCurrentUserId()
-    {
-        var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-        return int.TryParse(claim, out int id) ? id : null;
     }
 }
