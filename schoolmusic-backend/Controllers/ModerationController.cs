@@ -4,7 +4,8 @@ using schoolmusic_backend.Models;
 using StackExchange.Redis;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
-
+using Microsoft.AspNetCore.SignalR;
+using schoolmusic_backend.Extensions;
 
 namespace schoolmusic_backend.Controllers
 {
@@ -318,6 +319,69 @@ namespace schoolmusic_backend.Controllers
             {
                 Message = "Wszyscy zbanowani użytkownicy",
                 BannedUsers = bannedUsers
+            });
+        }
+
+        [HttpPost("ban/{userId:int}")]
+        public async Task<IActionResult> BanUser(int userId)
+        {
+            bool isBanned = await _context.BannedUsers
+                  .AnyAsync(u => u.UserId == userId);
+            var modId = HttpContext.GetCurrentUserId();
+            if(modId == null)
+            {
+                return Unauthorized(new
+                {
+                    Message = "Nieprawidłowy lub brakujący identyfikator"
+                });
+            }
+            if(!isBanned)
+            {
+                _context.BannedUsers.Add(new BannedUser
+                {
+                    UserId = userId,
+                    ModeratorId = modId.Value,
+                    BannedAt = DateTime.UtcNow
+
+                });
+                await _context.SaveChangesAsync();
+                return Ok(new
+                {
+                    Message = $"Poprawnie zbanowano użytkownka o id {userId}",
+                });
+            }
+            return Conflict(new
+            {
+                Message = "Ten użytkownik został już zbanowany"
+            });
+        }
+
+        [HttpPost("unaban/{banId:int}")]
+        public async Task<IActionResult> UnbanUser(int banId)
+        {
+            bool isBanned = await _context.BannedUsers
+                    .AnyAsync(u => u.Id == banId);
+            var modId = HttpContext.GetCurrentUserId();
+            if(modId == null)
+            {
+                return Unauthorized(new
+                {
+                    Message = "Nieprawidłowy lub brakujący identyfikator"
+                });
+            }
+            if (!isBanned)
+            {
+                await _context.BannedUsers.Where(u => u.Id == banId)
+                    .ExecuteDeleteAsync();
+                await _context.SaveChangesAsync();
+                return Ok(new
+                {
+                    Message = "Pomyślnie odbanowano użytkownika"
+                });
+            }
+            return BadRequest(new
+            {
+                Message = "Podany użytkownik nie jest zbanowany"
             });
         }
     }

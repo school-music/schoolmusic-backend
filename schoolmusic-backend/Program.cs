@@ -4,11 +4,13 @@ using Scalar.AspNetCore;
 using schoolmusic_backend.Models;
 using System.Text;
 using StackExchange.Redis;
+using LibVLCSharp.Shared;
 
 /// TODO: commets to every controller, to make code more readable,
 /// since the first controllers (UserController, TracksController) are simple but the more advanced 
 /// ones will be a lot more complex
 
+LibVLCSharp.Shared.Core.Initialize();
 
 var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("database");

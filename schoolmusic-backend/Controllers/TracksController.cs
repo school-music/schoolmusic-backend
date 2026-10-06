@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using NAudio.Wave;
+using LibVLCSharp.Shared;
 using Pomelo.EntityFrameworkCore.MySql.Query.Internal;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Extensions;
@@ -70,7 +70,7 @@ public class TracksController : ControllerBase
             .FirstOrDefaultAsync(u => u.Id == currentUserId);
         var song = await _context.Songs.FindAsync(id);
 
-        if(song == null)
+        if (song == null)
         {
             // ! tutaj trzeba zrobić podłączenie do spotify web api a później dodać do bazy danych
             // await Songs.Add(song);
@@ -81,7 +81,7 @@ public class TracksController : ControllerBase
                 Message = "Nie znaleziono piosenki (dołącz SPotify API póxniej"
             });
         }
-        if(user == null)
+        if (user == null)
         {
             return NotFound(new
             {
@@ -126,14 +126,14 @@ public class TracksController : ControllerBase
         var song = await _context.Songs
             .FirstOrDefaultAsync(s => s.SpotifyId == spotifyId);
 
-        if(user == null)
+        if (user == null)
         {
             return NotFound(new
             {
                 Message = "Nie znaleziono użytkownika o podanym ID"
             });
         }
-        if(song == null)
+        if (song == null)
         {
             return NotFound(new
             {
@@ -171,16 +171,16 @@ public class TracksController : ControllerBase
         }
 
         var user = await _context.Users.Include(u => u.Songs)
-            .FirstOrDefaultAsync(u => u.Id ==  currentUserId);
+            .FirstOrDefaultAsync(u => u.Id == currentUserId);
         var song = await _context.Songs.FirstOrDefaultAsync(s => s.Id == id);
-        if(user == null)
+        if (user == null)
         {
             return NotFound(new
             {
                 Message = "Nie znaleziono użytkownika"
             });
         }
-        if(song == null)
+        if (song == null)
         {
             return NotFound(new
             {
@@ -206,40 +206,54 @@ public class TracksController : ControllerBase
     [AllowAnonymous]
     // Testowa funkcja do odtworzenia piosenki na Twoim Windowsie
     // url https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3
+    // url3 https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3
     public async Task<IActionResult> PlaySong([FromQuery] string url)
     {
-        if (string.IsNullOrEmpty(url))
-        {
-            return BadRequest(new
-            {
-                Message = "Brakujący argument url w zapytaniu"
-            });
-        }
+        string targetUrl = string.IsNullOrWhiteSpace(url)
+                ? "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
+                : url;
+
+        // 1. Pobieramy plik do pliku tymczasowego na dysku
+        // Rozwiązuje problem desynchronizacji zegara imem i braku seekowania
+        string tempFilePath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.mp3");
 
         try
         {
-            using (var mf = new MediaFoundationReader(url)) // odtwarzanie z URL
-            using (var wo = new WasapiPlayerBuilder().WithDefaultDeviceStreamRouting().Build()) // domyślne urządzenie audio
+            using (var httpClient = new HttpClient())
             {
-                wo.Init(mf);
-                wo.Play();
-
-                //
-                int sekundy = 0;
-                while (wo.PlaybackState == PlaybackState.Playing && sekundy < 15)
-                {
-                    await Task.Delay(1000);
-                    sekundy++;
-                }
-
-                wo.Stop();
+                var bytes = await httpClient.GetByteArrayAsync(targetUrl);
+                await System.IO.File.WriteAllBytesAsync(tempFilePath, bytes);
             }
 
-            return Ok(new { Message = "Test odtwarzania zakończony pomyślnie!" });
+            // 2. Opcje dla LibVLC: zwiększony bufor i synchronizacja audio
+            string[] options = new[]
+            {
+            "--file-caching=2000",
+            "--network-caching=2000",
+            "--clock-jitter=0",
+            "--aout=directsound" // alternatywny backend audio pod Windows, zapobiegający problemom z wasapi
+        };
+
+            using var libvlc = new LibVLCSharp.Shared.LibVLC(enableDebugLogs: false, options);
+            using var media = new Media(libvlc, tempFilePath, FromType.FromPath);
+            using var mediaPlayer = new MediaPlayer(media);
+
+            mediaPlayer.Play();
+
+            // Odtwarzaj przez 15 sekund
+            await Task.Delay(TimeSpan.FromSeconds(15));
+
+            mediaPlayer.Stop();
         }
-        catch (Exception ex)
+        finally
         {
-            return StatusCode(500, new { error = ex.Message });
+            // Sprzątanie pliku po odtworzeniu
+            if (System.IO.File.Exists(tempFilePath))
+            {
+                try { System.IO.File.Delete(tempFilePath); } catch { }
+            }
         }
+
+        return Ok(new { Message = "Zagrano piosenke" });
     }
 }
