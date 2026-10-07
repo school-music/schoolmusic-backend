@@ -239,11 +239,6 @@ public class TracksController : ControllerBase
             using var mediaPlayer = new MediaPlayer(media);
 
             mediaPlayer.Play();
-
-            // Odtwarzaj przez 15 sekund
-            await Task.Delay(TimeSpan.FromSeconds(15));
-
-            mediaPlayer.Stop();
         }
         finally
         {
@@ -254,6 +249,9 @@ public class TracksController : ControllerBase
             }
         }
 
-        return Ok(new { Message = "Zagrano piosenke" });
+        return Ok(new { 
+            Message = "Zagrano piosenke",
+            Url = targetUrl
+        });
     }
 }
