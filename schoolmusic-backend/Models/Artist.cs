@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace schoolmusic_backend.Models;
@@ -18,4 +18,9 @@ public partial class Artist
     public virtual ICollection<SongGreenlist> SongGreenlists { get; set; } = new List<SongGreenlist>();
 
     public virtual ICollection<Song> Songs { get; set; } = new List<Song>();
+
+    public override string ToString()
+    {
+        return this.Name ?? "Unknown";
+    }
 }

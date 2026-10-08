@@ -5,6 +5,7 @@ using schoolmusic_backend.Models;
 using System.Text;
 using StackExchange.Redis;
 using LibVLCSharp.Shared;
+using schoolmusic_backend.Services;
 
 /// TODO: commets to every controller, to make code more readable,
 /// since the first controllers (UserController, TracksController) are simple but the more advanced 
@@ -51,7 +52,23 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
     ConnectionMultiplexer.Connect(redisConnectionString)
 );
 
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("CorsPolicy", policy =>
+    {
+        policy.WithOrigins("http://localhost:3000") // adres aplikacji klienckiej
+        .AllowAnyHeader()
+        .AllowAnyMethod()
+        .AllowCredentials();
+    });
+});
+
+
+// SignalR configuration
 builder.Services.AddSignalR();
+
+builder.Services.AddScoped<IBreakService, BreakService>();
+
 
 var app = builder.Build();
 
@@ -61,6 +78,8 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
     app.MapScalarApiReference();
 }
+
+app.UseCors("CorsPolicy");
 
 app.UseHttpsRedirection();
 

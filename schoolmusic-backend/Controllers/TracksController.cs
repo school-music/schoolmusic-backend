@@ -6,6 +6,7 @@ using Pomelo.EntityFrameworkCore.MySql.Query.Internal;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Extensions;
 using static System.Net.WebRequestMethods;
+using schoolmusic_backend.Services;
 
 [Route("api/[controller]")]
 [ApiController]
@@ -13,9 +14,11 @@ using static System.Net.WebRequestMethods;
 public class TracksController : ControllerBase
 {
     private readonly schoolmusicContext _context;
-    public TracksController(schoolmusicContext context)
+    private readonly IBreakService _breakService;
+    public TracksController(schoolmusicContext context, IBreakService breakService)
     {
         _context = context;
+        _breakService = breakService;
     }
 
     [HttpGet("favourites")]
@@ -253,5 +256,47 @@ public class TracksController : ControllerBase
             Message = "Zagrano piosenke",
             Url = targetUrl
         });
+    }
+
+    [HttpGet("testing-websockets")]
+    [AllowAnonymous]
+    public async Task<IActionResult> getRanks(int breakId)
+    {
+        var breakEntity = await _context.Breaks.FindAsync(breakId);
+        if (breakEntity == null) return Ok(new { Message = "Nie znaleziono przerwy o podanym id" });
+
+        int breakDurationSeconds = 0;
+        if(breakEntity.EndsAt.HasValue && breakEntity.EndsAt.Value > breakEntity.StartAt)
+        {
+            breakDurationSeconds = (int)(breakEntity.EndsAt.Value - breakEntity.StartAt).TotalSeconds;
+        }
+        else
+        {
+            return Problem(
+                detail: "Przerwa nie ma ustawionego poprawnie czasu",
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Błąd przerwy"
+            );
+        }
+        var approvedQueue = await _context.QueueItems
+            .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
+            .Include(q => q.Song)
+                .ThenInclude(s => s.Artist)
+            .Include(q => q.Votes)
+            .ToListAsync();
+
+        if (!approvedQueue.Any())
+        {
+            return Ok(new
+            {
+                Message = "Brak utworów w kolejce na tę przerwę.",
+                BreakId = breakId,
+                DurationSeconds = breakDurationSeconds,
+                Tracks = Array.Empty<object>()
+            });
+        }
+
+        var breakPlan = _breakService.CalculateBreak(breakId, breakDurationSeconds, approvedQueue);
+        return Ok(breakPlan);
     }
 }
