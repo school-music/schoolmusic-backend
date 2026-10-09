@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.SignalR;
 using schoolmusic_backend.Extensions;
+using schoolmusic_backend.Hubs;
 
 namespace schoolmusic_backend.Controllers
 {
@@ -16,10 +17,13 @@ namespace schoolmusic_backend.Controllers
     {
         private readonly schoolmusicContext _context;
         private readonly IConnectionMultiplexer _redis;
-        public ModerationController(schoolmusicContext context, IConnectionMultiplexer redis)
+        private readonly IHubContext<QueueHub> _hubContext;
+
+        public ModerationController(schoolmusicContext context, IConnectionMultiplexer redis, IHubContext<QueueHub> hubContext)
         {
             _context = context;
             _redis = redis;
+            _hubContext = hubContext;
         }
         public record SongProposalDto(
             string Id,
@@ -196,6 +200,41 @@ namespace schoolmusic_backend.Controllers
 
             moderator.SongsApproved = (moderator.SongsApproved ?? 0) + 1;
             await _context.SaveChangesAsync();
+
+            // Powiadamiamy wszystkich podłączonych do tej przerwy o nowej zatwierdzonej piosence
+            // poprzez SignalR i aktualizujemy kolejkę w czasie rzeczywistym
+            var items = await _context.QueueItems
+                .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
+                .Include(q => q.Song)
+                    .ThenInclude(s => s.Artist)
+                .Include(q => q.User)
+                .Include(q => q.Votes)
+                .ToListAsync();
+
+            var ranking = items
+                .OrderByDescending(q => q.Votes.Count)
+                .ThenBy(q => q.OrderIndex)
+                .Select((q, index) => new
+                {
+                    position = index + 1,
+                    queueItemId = q.Id,
+                    songId = q.SongId,
+                    title = q.Song.Title,
+                    artistName = q.Song.Artist?.Name ?? "Nieznany wykonawca",
+                    cover = q.Song.Cover,
+                    durationMs = q.Song.DurationMs,
+                    votesCount = q.Votes.Count,
+                    submittedBy = q.User.UserLogin,
+                    orderIndex = q.OrderIndex
+                })
+                .ToList();
+
+            await _hubContext.Clients.Group($"Break_{breakId}").SendAsync("QueueUpdated", new
+            {
+                breakId,
+                totalSongs = ranking.Count,
+                queue = ranking
+            });
 
             return Ok(new
             {

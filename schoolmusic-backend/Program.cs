@@ -56,10 +56,10 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("CorsPolicy", policy =>
     {
-        policy.WithOrigins("http://localhost:3000") // adres aplikacji klienckiej
-        .AllowAnyHeader()
-        .AllowAnyMethod()
-        .AllowCredentials();
+        policy.SetIsOriginAllowed(_ => true)
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
     });
 });
 
@@ -68,6 +68,8 @@ builder.Services.AddCors(options =>
 builder.Services.AddSignalR();
 
 builder.Services.AddScoped<IBreakService, BreakService>();
+builder.Services.AddScoped<IRadioStatusService, RadioStatusService>();
+builder.Services.AddScoped<IQueueService, QueueService>();
 
 
 var app = builder.Build();

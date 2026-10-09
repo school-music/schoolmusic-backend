@@ -33,13 +33,13 @@ namespace schoolmusic_backend.Services
     {
         public ScheduledBreakPlan CalculateBreak(int breakId, int breakDurationSeconds, List<QueueItem> approvedQueue)
         {
-            if(breakDurationSeconds <= 0)
+            if (breakDurationSeconds <= 0)
             {
-                return null;
+                return new ScheduledBreakPlan(breakId, Math.Max(0, breakDurationSeconds), 0, Math.Max(0, breakDurationSeconds), new List<ScheduledTrackDto>());
             }
             if (approvedQueue == null || approvedQueue.Count == 0)
             {
-                return null;
+                return new ScheduledBreakPlan(breakId, breakDurationSeconds, 0, breakDurationSeconds, new List<ScheduledTrackDto>());
             }
             int currentOffset = 0;
             var playlist = new List<ScheduledTrackDto>();
@@ -78,6 +78,7 @@ namespace schoolmusic_backend.Services
             if (remainingSeconds > 0 && pool.Count > 0)
             {
                 var gapFiller = pool
+                    .Where(q => (q.Song.DurationMs / 1000) <= remainingSeconds)
                     .OrderBy(q => Math.Abs((q.Song.DurationMs / 1000) - remainingSeconds))
                     .ThenByDescending(q => q.Votes.Count)
                     .ThenBy(q => q.OrderIndex)
