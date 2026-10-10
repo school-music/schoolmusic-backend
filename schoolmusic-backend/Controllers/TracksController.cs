@@ -2,7 +2,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using LibVLCSharp.Shared;
-using Pomelo.EntityFrameworkCore.MySql.Query.Internal;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Extensions;
 using static System.Net.WebRequestMethods;
