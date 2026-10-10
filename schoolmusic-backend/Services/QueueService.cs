@@ -1,4 +1,4 @@
-    using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
@@ -16,23 +16,29 @@ namespace schoolmusic_backend.Services
         Task<ServiceResult<object>> ProposeSongAsync(ProposeSongDto dto, int currentUserId);
         Task<ServiceResult<object>> VoteAsync(VoteRequestDto dto, int currentUserId);
         Task<ServiceResult<object>> RemoveVoteAsync(int queueItemId, int currentUserId);
+        Task<ServiceResult<object>> ArchiveBreakAsync(int breakId);
         Task BroadcastQueueAsync(int breakId);
     }
 
     public class QueueService : IQueueService
     {
+        private const int SongCooldownHours = 24;
+
         private readonly schoolmusicContext _context;
         private readonly IConnectionMultiplexer _redis;
         private readonly IHubContext<QueueHub> _hubContext;
+        private readonly IBreakService _breakService;
 
         public QueueService(
             schoolmusicContext context,
             IConnectionMultiplexer redis,
-            IHubContext<QueueHub> hubContext)
+            IHubContext<QueueHub> hubContext,
+            IBreakService breakService)
         {
             _context = context;
             _redis = redis;
             _hubContext = hubContext;
+            _breakService = breakService;
         }
 
         public async Task BroadcastQueueAsync(int breakId)
@@ -147,6 +153,19 @@ namespace schoolmusic_backend.Services
             if (isSongBlacklisted || isArtistBlacklisted)
             {
                 return ServiceResult<object>.BadRequest("Ten utwór lub wykonawca znajduje się na czarnej liście i nie może być odtwarzany.");
+            }
+
+            // Sprawdzenie cooldownu (czy utwór nie był odtwarzany w ciągu ostatnich 24 godzin)
+            var lastPlayed = await _context.Histories
+                .Where(h => h.SongId == song.Id)
+                .OrderByDescending(h => h.PlayedAt)
+                .FirstOrDefaultAsync();
+
+            if (lastPlayed != null && lastPlayed.PlayedAt > DateTime.UtcNow.AddHours(-SongCooldownHours))
+            {
+                var remaining = lastPlayed.PlayedAt.AddHours(SongCooldownHours) - DateTime.UtcNow;
+                var hours = Math.Max(1, (int)Math.Ceiling(remaining.TotalHours));
+                return ServiceResult<object>.BadRequest($"Ten utwór był niedawno odtwarzany na radiowęźle ({lastPlayed.PlayedAt:dd.MM HH:mm}). Będzie dostępny do ponownego zgłoszenia za ok. {hours} godz.");
             }
 
             // Ustalenie przerwy docelowej
@@ -359,6 +378,19 @@ namespace schoolmusic_backend.Services
                 }
                 else
                 {
+                    // Sprawdzenie cooldownu przed automatycznym dodaniem z Greenlisty
+                    var lastPlayed = await _context.Histories
+                        .Where(h => h.SongId == dto.SongId.Value)
+                        .OrderByDescending(h => h.PlayedAt)
+                        .FirstOrDefaultAsync();
+
+                    if (lastPlayed != null && lastPlayed.PlayedAt > DateTime.UtcNow.AddHours(-SongCooldownHours))
+                    {
+                        var remaining = lastPlayed.PlayedAt.AddHours(SongCooldownHours) - DateTime.UtcNow;
+                        var hours = Math.Max(1, (int)Math.Ceiling(remaining.TotalHours));
+                        return ServiceResult<object>.BadRequest($"Ten utwór był niedawno odtwarzany na radiowęźle ({lastPlayed.PlayedAt:dd.MM HH:mm}). Będzie dostępny za ok. {hours} godz.");
+                    }
+
                     int currentMaxOrder = await _context.QueueItems
                         .Where(q => q.BreakId == targetBreakId)
                         .MaxAsync(q => (int?)q.OrderIndex) ?? 0;
@@ -456,6 +488,96 @@ namespace schoolmusic_backend.Services
                 queueItemId,
                 votesCount = remainingVotes,
                 hasVoted = false
+            });
+        }
+
+        public async Task<ServiceResult<object>> ArchiveBreakAsync(int breakId)
+        {
+            var breakEntity = await _context.Breaks.FindAsync(breakId);
+            if (breakEntity == null)
+            {
+                return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+            }
+
+            // 1. Obliczamy czas trwania przerwy w sekundach
+            DateTime end = breakEntity.EndsAt.HasValue ? breakEntity.EndsAt.Value : breakEntity.StartAt;
+            int durationSeconds = (int)(end - breakEntity.StartAt).TotalSeconds;
+            if (durationSeconds <= 0)
+            {
+                durationSeconds = 600;
+            }
+
+            // 2. Pobieramy wszystkie zatwierdzone pozycje z kolejki tej przerwy
+            var approvedQueueItems = await _context.QueueItems
+                .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
+                .Include(q => q.Song)
+                    .ThenInclude(s => s.Artist)
+                .Include(q => q.Votes)
+                .ToListAsync();
+
+            var now = DateTime.UtcNow;
+            var playedTracksInfo = new List<object>();
+
+            if (approvedQueueItems.Count > 0)
+            {
+                // 3. Używamy algorytmu BreakService, aby ustalić, które dokładnie utwory zmieściły się w czasie przerwy
+                var schedulePlan = _breakService.CalculateBreak(breakId, durationSeconds, approvedQueueItems);
+                var playedQueueItemIds = schedulePlan.Tracks.Select(t => t.QueueItemId).ToHashSet();
+
+                var playedItems = approvedQueueItems.Where(q => playedQueueItemIds.Contains(q.Id)).ToList();
+
+                // 4. Zapisujemy odtworzone utwory do tabeli history
+                foreach (var played in playedItems)
+                {
+                    var historyEntry = new History
+                    {
+                        SongId = played.SongId,
+                        BreakId = breakId,
+                        PlayedAt = now,
+                        Votes = played.Votes.Count
+                    };
+                    _context.Histories.Add(historyEntry);
+
+                    playedTracksInfo.Add(new
+                    {
+                        songId = played.SongId,
+                        title = played.Song.Title,
+                        artist = played.Song.Artist?.Name ?? "Nieznany wykonawca",
+                        votes = played.Votes.Count
+                    });
+                }
+            }
+
+            // 5. Usuwamy wszystkie QueueItems i powiązane głosy dla tej przerwy (czyścimy kolejkę)
+            var allBreakQueueItems = await _context.QueueItems
+                .Where(q => q.BreakId == breakId)
+                .Include(q => q.Votes)
+                .ToListAsync();
+
+            var allVotes = allBreakQueueItems.SelectMany(q => q.Votes).ToList();
+            if (allVotes.Count > 0)
+            {
+                _context.Votes.RemoveRange(allVotes);
+            }
+
+            if (allBreakQueueItems.Count > 0)
+            {
+                _context.QueueItems.RemoveRange(allBreakQueueItems);
+            }
+
+            await _context.SaveChangesAsync();
+
+            // 6. Rozsyłamy powiadomienie SignalR (kolejka jest teraz wyczyszczona)
+            await BroadcastQueueAsync(breakId);
+
+            return ServiceResult<object>.Ok(new
+            {
+                Message = $"Przerwa #{breakEntity.BreakNumber} została pomyślnie zarchiwizowana. Zapisano historię i wyczyszczono kolejkę.",
+                breakId = breakEntity.Id,
+                breakNumber = breakEntity.BreakNumber,
+                archivedTracksCount = playedTracksInfo.Count,
+                totalClearedTracks = allBreakQueueItems.Count,
+                archivedTracks = playedTracksInfo
             });
         }
     }

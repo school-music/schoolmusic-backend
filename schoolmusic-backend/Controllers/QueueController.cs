@@ -136,5 +136,17 @@ namespace schoolmusic_backend.Controllers
             var result = await _queueService.RemoveVoteAsync(queueItemId, currentUserId.Value);
             return FromResult(result);
         }
+
+        /// <summary>
+        /// Zamyka przerwę, przenosi utwory, które zagrały, do tabeli historii i czyści kolejkę.
+        /// Dostęp tylko dla moderatorów i administratorów.
+        /// </summary>
+        [HttpPost("break/{breakId:int}/archive")]
+        [Authorize(Roles = "mod,admin,head_admin")]
+        public async Task<IActionResult> ArchiveBreak(int breakId)
+        {
+            var result = await _queueService.ArchiveBreakAsync(breakId);
+            return FromResult(result);
+        }
     }
 }
