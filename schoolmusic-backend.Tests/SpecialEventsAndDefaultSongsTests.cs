@@ -1,11 +1,14 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using schoolmusic_backend.Controllers;
+using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 using Xunit;
@@ -20,6 +23,41 @@ public class SpecialEventsAndDefaultSongsTests
             .UseInMemoryDatabase(databaseName: dbName)
             .Options;
         return new schoolmusicContext(options);
+    }
+
+    private static IHubContext<QueueHub> CreateMockHubContext()
+    {
+        var hubClient = new Mock<IClientProxy>();
+        hubClient.Setup(client => client.SendCoreAsync(
+                It.IsAny<string>(),
+                It.IsAny<object?[]>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var hubClients = new Mock<IHubClients>();
+        hubClients.Setup(clients => clients.Group(QueueHub.KioskGroup)).Returns(hubClient.Object);
+        var hubContext = new Mock<IHubContext<QueueHub>>();
+        hubContext.Setup(context => context.Clients).Returns(hubClients.Object);
+        return hubContext.Object;
+    }
+
+    private static ISystemStatusService CreateMockStatusService()
+    {
+        var statusService = new Mock<ISystemStatusService>();
+        statusService.Setup(service => service.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SystemStatusDto(
+                SchoolState.Lesson,
+                DateTime.UtcNow,
+                null,
+                null,
+                0,
+                null,
+                null,
+                true,
+                null,
+                "Lekcja",
+                null,
+                Array.Empty<TopTrackDto>()));
+        return statusService.Object;
     }
 
     private static (TController controller, schoolmusicContext context) CreateAdminController<TController>(
@@ -254,14 +292,17 @@ public class SpecialEventsAndDefaultSongsTests
         services.AddScoped(_ => CreateInMemoryContext(dbName));
         services.AddScoped<IBreakService, BreakService>();
         services.AddScoped(_ => new Mock<IQueueService>().Object);
+        services.AddScoped(_ => CreateMockStatusService());
         var serviceProvider = services.BuildServiceProvider();
 
         var mockScopeFactory = new Mock<IServiceScopeFactory>();
         mockScopeFactory.Setup(f => f.CreateScope()).Returns(() => serviceProvider.CreateScope());
 
-        var mockLogger = new Mock<ILogger<BreakSchedulerService>>();
-
-        var scheduler = new BreakSchedulerService(mockScopeFactory.Object, mockPlayer.Object, mockLogger.Logger());
+        var scheduler = new BreakSchedulerService(
+            mockScopeFactory.Object,
+            mockPlayer.Object,
+            CreateMockHubContext(),
+            NullLogger<BreakSchedulerService>.Instance);
 
         // Act: wywołanie ProcessTickAsync
         await scheduler.ProcessTickAsync();
@@ -316,14 +357,17 @@ public class SpecialEventsAndDefaultSongsTests
         services.AddScoped<IBreakService, BreakService>();
         var mockQueueService = new Mock<IQueueService>();
         services.AddScoped(_ => mockQueueService.Object);
+        services.AddScoped(_ => CreateMockStatusService());
         var serviceProvider = services.BuildServiceProvider();
 
         var mockScopeFactory = new Mock<IServiceScopeFactory>();
         mockScopeFactory.Setup(f => f.CreateScope()).Returns(() => serviceProvider.CreateScope());
 
-        var mockLogger = new Mock<ILogger<BreakSchedulerService>>();
-
-        var scheduler = new BreakSchedulerService(mockScopeFactory.Object, mockPlayer.Object, mockLogger.Logger());
+        var scheduler = new BreakSchedulerService(
+            mockScopeFactory.Object,
+            mockPlayer.Object,
+            CreateMockHubContext(),
+            NullLogger<BreakSchedulerService>.Instance);
 
         // Act
         await scheduler.ProcessTickAsync();
