@@ -38,6 +38,14 @@ jobs:
       - name: Run xUnit test with code coverage
         run: dotnet test schoolmusic-backend.sln --configuration Release --no-build --verbosity normal --collect:"XPlat Code Coverage"
 
+      - name: Upload Cobertura coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: "**/coverage.cobertura.xml"
+          if-no-files-found: warn
+
   docker-verify:
     name: Verify Docker & Compose Build
     needs: build-and-test

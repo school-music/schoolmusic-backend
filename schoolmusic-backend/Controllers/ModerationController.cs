@@ -429,8 +429,8 @@ namespace schoolmusic_backend.Controllers
         [HttpPost("unaban/{banId:int}")]
         public async Task<IActionResult> UnbanUser(int banId)
         {
-            bool isBanned = await _context.BannedUsers
-                    .AnyAsync(u => u.Id == banId);
+            var bannedUser = await _context.BannedUsers
+                    .FirstOrDefaultAsync(u => u.Id == banId);
             var modId = HttpContext.GetCurrentUserId();
             if(modId == null)
             {
@@ -439,10 +439,9 @@ namespace schoolmusic_backend.Controllers
                     Message = "Nieprawidłowy lub brakujący identyfikator"
                 });
             }
-            if (!isBanned)
+            if (bannedUser != null)
             {
-                await _context.BannedUsers.Where(u => u.Id == banId)
-                    .ExecuteDeleteAsync();
+                _context.BannedUsers.Remove(bannedUser);
                 await _context.SaveChangesAsync();
                 return Ok(new
                 {
