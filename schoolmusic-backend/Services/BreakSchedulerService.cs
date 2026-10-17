@@ -10,6 +10,7 @@ namespace schoolmusic_backend.Services
         Task<bool> SkipCurrentTrackAsync();
         ScheduledBreakPlan? GetCurrentPlan();
         int? GetActiveBreakId();
+        Task ProcessTickAsync(CancellationToken stoppingToken = default);
     }
 
     /// <summary>
@@ -56,6 +57,11 @@ namespace schoolmusic_backend.Services
             {
                 return _activeBreakId;
             }
+        }
+
+        public async Task ProcessTickAsync(CancellationToken stoppingToken = default)
+        {
+            await TickAsync(stoppingToken);
         }
 
         public async Task<bool> SkipCurrentTrackAsync()
@@ -151,6 +157,33 @@ namespace schoolmusic_backend.Services
             sbyte weekday = (sbyte)now.DayOfWeek;
             if (weekday == 0) weekday = 7; // ISO: 1 = Poniedziałek, 7 = Niedziela
 
+            // 0. Obsługa zaplanowanych wydarzeń specjalnych (SpecialEvent)
+            var pendingSpecialEvent = await db.SpecialEvents
+                .Where(e => e.EventStatus == "pending" && e.StartsAt <= now)
+                .OrderBy(e => e.StartsAt)
+                .FirstOrDefaultAsync(stoppingToken);
+
+            if (pendingSpecialEvent != null)
+            {
+                _logger.LogInformation("Rozpoczynanie odtwarzania wydarzenia specjalnego #{Id} ({Title}) zaplanowanego na {StartsAt}",
+                    pendingSpecialEvent.Id, pendingSpecialEvent.Title, pendingSpecialEvent.StartsAt);
+
+                pendingSpecialEvent.EventStatus = "playing";
+                await db.SaveChangesAsync(stoppingToken);
+
+                await _playerService.StopAsync();
+
+                var playResult = await _playerService.PlayFileOrUrlAsync(
+                    pendingSpecialEvent.FileUrl,
+                    pendingSpecialEvent.Title ?? "Wydarzenie specjalne",
+                    "Komunikat szkolny");
+
+                pendingSpecialEvent.EventStatus = "done";
+                await db.SaveChangesAsync(stoppingToken);
+
+                _logger.LogInformation("Wydarzenie specjalne #{Id} zakończone i oznaczone jako 'done'.", pendingSpecialEvent.Id);
+            }
+
             // 1. Sprawdzenie exception_day (dzień wolny / zakaz muzyki)
             bool isDayOff = await db.ExceptionDays.AnyAsync(e =>
                 e.StartDate <= today && today <= e.EndDate &&
@@ -213,6 +246,62 @@ namespace schoolmusic_backend.Services
                         .ThenInclude(s => s.Artist)
                     .Include(q => q.Votes)
                     .ToListAsync(stoppingToken);
+
+                // Fallback: jeśli kolejka jest pusta, używamy DefaultSongs
+                if (approvedQueue.Count == 0)
+                {
+                    var defaultSongs = await db.DefaultSongs
+                        .Include(d => d.Song)
+                            .ThenInclude(s => s.Artist)
+                        .Where(d => d.Song.IsActive)
+                        .OrderBy(d => d.Id)
+                        .ToListAsync(stoppingToken);
+
+                    if (defaultSongs.Count > 0)
+                    {
+                        _logger.LogInformation("Kolejka dla przerwy {BreakId} jest pusta. Załadowano {Count} utworów z listy domyślnej (DefaultSongs).",
+                            activeBreak.Id, defaultSongs.Count);
+
+                        var existingSongIds = await db.QueueItems
+                            .Where(q => q.BreakId == activeBreak.Id)
+                            .Select(q => q.SongId)
+                            .ToListAsync(stoppingToken);
+
+                        int maxOrder = await db.QueueItems
+                            .Where(q => q.BreakId == activeBreak.Id)
+                            .MaxAsync(q => (int?)q.OrderIndex, stoppingToken) ?? 0;
+
+                        int nextOrder = maxOrder + 1;
+                        foreach (var ds in defaultSongs)
+                        {
+                            if (!existingSongIds.Contains(ds.SongId))
+                            {
+                                var fallbackItem = new QueueItem
+                                {
+                                    BreakId = activeBreak.Id,
+                                    SongId = ds.SongId,
+                                    Song = ds.Song,
+                                    UserId = null,
+                                    ModerationStatus = "approved",
+                                    Status = "queued",
+                                    OrderIndex = nextOrder++,
+                                    CreatedAt = DateTime.Now
+                                };
+                                db.QueueItems.Add(fallbackItem);
+                            }
+                        }
+                        await db.SaveChangesAsync(stoppingToken);
+
+                        approvedQueue = await db.QueueItems
+                            .Where(q => q.BreakId == activeBreak.Id &&
+                                        (q.ModerationStatus == "approved" || q.ModerationStatus == null) &&
+                                        q.Status != "played" && q.Status != "skipped")
+                            .Include(q => q.Song)
+                                .ThenInclude(s => s.Artist)
+                            .Include(q => q.Votes)
+                            .ToListAsync(stoppingToken);
+                    }
+                }
 
                 var plan = breakService.CalculateBreak(activeBreak.Id, remainingSeconds, approvedQueue);
 
