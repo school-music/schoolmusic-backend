@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Nazwa tagu / wersji (np. v1.0.0)'
+        required: false
+        default: ''
+      draft:
+        description: 'Czy utworzyć wersję roboczą (draft)?'
+        type: boolean
+        required: false
+        default: false
+      prerelease:
+        description: 'Czy oznaczyć jako wersję wstępną (prerelease)?'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build, Test & Create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore dependencies
+        run: dotnet restore schoolmusic-backend.sln
+
+      - name: Run unit tests
+        run: dotnet test schoolmusic-backend.sln --configuration Release --no-restore --verbosity normal
+
+      - name: Determine Release Tag
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag_name }}" ]; then
+            TAG="${{ inputs.tag_name }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="v1.0.${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Building release for tag: $TAG"
+
+      - name: Publish portable framework-dependent build
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          dotnet publish schoolmusic-backend/schoolmusic-backend.csproj \
+            --configuration Release \
+            --output ./dist/portable \
+            /p:UseAppHost=false
+          
+          # Dołącz pliki pomocnicze jeśli istnieją
+          [ -f docker-compose.yml ] && cp docker-compose.yml ./dist/portable/
+          [ -d docs ] && cp -r docs ./dist/portable/
+          
+          cd ./dist/portable
+          zip -r "../../schoolmusic-backend-${TAG}.zip" .
+          cp "../../schoolmusic-backend-${TAG}.zip" "../../schoolmusic-backend-${TAG}-portable.zip"
+          cd ../..
+
+      - name: Publish Windows x64 build
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          dotnet publish schoolmusic-backend/schoolmusic-backend.csproj \
+            --configuration Release \
+            --runtime win-x64 \
+            --self-contained false \
+            --output ./dist/win-x64
+          
+          [ -f docker-compose.yml ] && cp docker-compose.yml ./dist/win-x64/
+          [ -d docs ] && cp -r docs ./dist/win-x64/
+          
+          cd ./dist/win-x64
+          zip -r "../../schoolmusic-backend-${TAG}-win-x64.zip" .
+          cd ../..
+
+      - name: Publish Linux x64 build
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          dotnet publish schoolmusic-backend/schoolmusic-backend.csproj \
+            --configuration Release \
+            --runtime linux-x64 \
+            --self-contained false \
+            --output ./dist/linux-x64
+          
+          [ -f docker-compose.yml ] && cp docker-compose.yml ./dist/linux-x64/
+          [ -d docs ] && cp -r docs ./dist/linux-x64/
+          
+          tar -czvf "schoolmusic-backend-${TAG}-linux-x64.tar.gz" -C ./dist/linux-x64 .
+
+      - name: Upload release archives as CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: schoolmusic-backend-packages
+          path: |
+            schoolmusic-backend-*.zip
+            schoolmusic-backend-*.tar.gz
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: School Music Backend ${{ steps.version.outputs.tag }}
+          draft: ${{ inputs.draft || false }}
+          prerelease: ${{ inputs.prerelease || false }}
+          generate_release_notes: true
+          files: |
+            schoolmusic-backend-*.zip
+            schoolmusic-backend-*.tar.gz
