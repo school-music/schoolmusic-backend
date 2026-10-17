@@ -16,6 +16,13 @@ namespace schoolmusic_backend.Hubs
         {
             await Groups.AddToGroupAsync(Context.ConnectionId, $"Break_{breakId}");
         }
+
+        /// <summary>
+        /// Dołącza bieżące połączenie do grupy kiosków otrzymującej zdarzenia stanu szkoły.
+        /// </summary>
+        public Task JoinKiosk() => Groups.AddToGroupAsync(Context.ConnectionId, KioskGroup);
+
+        public const string KioskGroup = "Kiosk";
         /// <summary>
         /// Usuwa bieżące połączenie z grupy SignalR o nazwie "Break_{breakId}".
         /// </summary>

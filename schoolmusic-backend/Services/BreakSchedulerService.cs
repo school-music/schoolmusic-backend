@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
 
 namespace schoolmusic_backend.Services
@@ -17,7 +19,9 @@ namespace schoolmusic_backend.Services
     {
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly IAudioPlayerService _playerService;
+        private readonly IHubContext<QueueHub> _hubContext;
         private readonly ILogger<BreakSchedulerService> _logger;
+        private SystemStatusDto? _lastKioskStatus;
 
         private int? _activeBreakId = null;
         private ScheduledBreakPlan? _currentPlan = null;
@@ -27,10 +31,12 @@ namespace schoolmusic_backend.Services
         public BreakSchedulerService(
             IServiceScopeFactory scopeFactory,
             IAudioPlayerService playerService,
+            IHubContext<QueueHub> hubContext,
             ILogger<BreakSchedulerService> logger)
         {
             _scopeFactory = scopeFactory;
             _playerService = playerService;
+            _hubContext = hubContext;
             _logger = logger;
 
             _playerService.MediaEnded += OnMediaEnded;
@@ -157,6 +163,7 @@ namespace schoolmusic_backend.Services
                     _logger.LogInformation("Dzień oznaczony jako wolny/bez muzyki. Zatrzymywanie odtwarzacza.");
                     await CleanupBreakAsync(db, queueService, _activeBreakId.Value);
                 }
+                await BroadcastSchoolStatusIfChangedAsync(scope, stoppingToken);
                 return;
             }
 
@@ -173,6 +180,7 @@ namespace schoolmusic_backend.Services
 
             if (activeBreak == null)
             {
+                await BroadcastSchoolStatusIfChangedAsync(scope, stoppingToken);
                 return;
             }
 
@@ -185,6 +193,7 @@ namespace schoolmusic_backend.Services
                     _logger.LogInformation("Muzyka wyłączona dla przerwy {BreakId}. Zatrzymywanie odtwarzania.", activeBreak.Id);
                     await CleanupBreakAsync(db, queueService, _activeBreakId.Value);
                 }
+                await BroadcastSchoolStatusIfChangedAsync(scope, stoppingToken);
                 return;
             }
 
@@ -235,7 +244,35 @@ namespace schoolmusic_backend.Services
                     }
                 }
             }
+
+            await BroadcastSchoolStatusIfChangedAsync(scope, stoppingToken);
         }
+
+        private async Task BroadcastSchoolStatusIfChangedAsync(IServiceScope scope, CancellationToken cancellationToken)
+        {
+            var statusService = scope.ServiceProvider.GetRequiredService<ISystemStatusService>();
+            var status = await statusService.GetStatusAsync(cancellationToken);
+            var previous = _lastKioskStatus;
+            if (previous != null && !HasKioskStatusChanged(previous, status))
+            {
+                return;
+            }
+
+            await _hubContext.Clients.Group(QueueHub.KioskGroup)
+                .SendAsync("SchoolStatusChanged", status, cancellationToken);
+            _lastKioskStatus = status;
+        }
+
+        private static bool HasKioskStatusChanged(SystemStatusDto previous, SystemStatusDto current) =>
+            previous.CurrentState != current.CurrentState ||
+            previous.BreakEndsAt != current.BreakEndsAt ||
+            previous.NextBreakStartsAt != current.NextBreakStartsAt ||
+            previous.CurrentBreakNumber != current.CurrentBreakNumber ||
+            previous.NextBreakNumber != current.NextBreakNumber ||
+            previous.MusicEnabled != current.MusicEnabled ||
+            previous.MuteReason != current.MuteReason ||
+            previous.NowPlaying?.QueueItemId != current.NowPlaying?.QueueItemId ||
+            previous.NowPlaying?.IsPaused != current.NowPlaying?.IsPaused;
 
         private static async Task<bool> DetermineMusicEnabledAsync(
             schoolmusicContext db,

@@ -344,7 +344,9 @@ namespace schoolmusic_backend.Services
         /// </summary>
         private async Task BroadcastPlaybackStatusAsync()
         {
-            await _hubContext.Clients.All.SendAsync("PlaybackStatusChanged", GetStatus());
+            var status = GetStatus();
+            await _hubContext.Clients.All.SendAsync("PlaybackStatusChanged", status);
+            await _hubContext.Clients.Group(QueueHub.KioskGroup).SendAsync("NowPlayingChanged", status);
         }
 
         /// <summary>
