@@ -1,8 +1,10 @@
 using System.Reflection;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
+using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 
@@ -27,6 +29,34 @@ public class BreakSchedulerServiceTests
             services.AddScoped(_ => BreakService.Object);
             services.AddScoped(_ => QueueService.Object);
 
+            var statusService = new Mock<ISystemStatusService>();
+            statusService.Setup(service => service.GetStatusAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new SystemStatusDto(
+                    SchoolState.Lesson,
+                    DateTime.UtcNow,
+                    null,
+                    null,
+                    0,
+                    null,
+                    null,
+                    true,
+                    null,
+                    "Lekcja",
+                    null,
+                    Array.Empty<TopTrackDto>()));
+            services.AddScoped(_ => statusService.Object);
+
+            var hubClient = new Mock<IClientProxy>();
+            hubClient.Setup(client => client.SendCoreAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<object?[]>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            var hubClients = new Mock<IHubClients>();
+            hubClients.Setup(clients => clients.Group(QueueHub.KioskGroup)).Returns(hubClient.Object);
+            var hubContext = new Mock<IHubContext<QueueHub>>();
+            hubContext.Setup(context => context.Clients).Returns(hubClients.Object);
+
             Provider = services.BuildServiceProvider();
             var playerStatus = new PlayerStatusDto(false, false, 50, false, "None", null, null, 0, 0);
             Player.Setup(p => p.GetStatus()).Returns(playerStatus);
@@ -38,6 +68,7 @@ public class BreakSchedulerServiceTests
             Service = new BreakSchedulerService(
                 Provider.GetRequiredService<IServiceScopeFactory>(),
                 Player.Object,
+                hubContext.Object,
                 NullLogger<BreakSchedulerService>.Instance);
         }
 
