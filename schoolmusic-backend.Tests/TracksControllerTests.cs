@@ -27,14 +27,12 @@ public class TracksControllerTests
     {
         var context = CreateInMemoryContext(dbName);
         var mockBreakService = new Mock<IBreakService>();
-        var mockAudioPlayer = new Mock<IAudioPlayerService>();
         songSource ??= new Mock<ISongSourceService>();
         songSource.SetupGet(source => source.IsConfigured).Returns(spotifyConfigured);
 
         var controller = new TracksController(
             context,
             mockBreakService.Object,
-            mockAudioPlayer.Object,
             songSource.Object);
 
         var httpContext = new DefaultHttpContext();

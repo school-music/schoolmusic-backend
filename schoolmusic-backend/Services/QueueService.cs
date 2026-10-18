@@ -38,20 +38,17 @@ namespace schoolmusic_backend.Services
         private readonly schoolmusicContext _context;
         private readonly IConnectionMultiplexer _redis;
         private readonly IHubContext<QueueHub> _hubContext;
-        private readonly IBreakService _breakService;
         private readonly ISongSourceService _songSourceService;
 
         public QueueService(
             schoolmusicContext context,
             IConnectionMultiplexer redis,
             IHubContext<QueueHub> hubContext,
-            IBreakService breakService,
             ISongSourceService songSourceService)
         {
             _context = context;
             _redis = redis;
             _hubContext = hubContext;
-            _breakService = breakService;
             _songSourceService = songSourceService;
         }
 
@@ -568,14 +565,6 @@ namespace schoolmusic_backend.Services
                 return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
             }
 
-            // Obliczamy czas trwania przerwy w sekundach
-            DateTime end = breakEntity.EndsAt;
-            int durationSeconds = (int)(end - breakEntity.StartAt).TotalSeconds;
-            if (durationSeconds <= 0)
-            {
-                durationSeconds = 600;
-            }
-
             // Pobieramy wszystkie zatwierdzone pozycje z kolejki tej przerwy
             var approvedQueueItems = await _context.QueueItems
                 .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
@@ -587,34 +576,29 @@ namespace schoolmusic_backend.Services
             var now = DateTime.UtcNow;
             var playedTracksInfo = new List<object>();
 
-            if (approvedQueueItems.Count > 0)
+            var playedItems = approvedQueueItems
+                .Where(item => item.Status == "played" || item.Status == "playing")
+                .ToList();
+
+            // Queue status is updated from Spotify playback polling; archive only tracks that actually started.
+            foreach (var played in playedItems)
             {
-                // Używamy algorytmu BreakService, aby ustalić, które dokładnie utwory zmieściły się w czasie przerwy
-                var schedulePlan = _breakService.CalculateBreak(breakId, durationSeconds, approvedQueueItems);
-                var playedQueueItemIds = schedulePlan.Tracks.Select(t => t.QueueItemId).ToHashSet();
-
-                var playedItems = approvedQueueItems.Where(q => playedQueueItemIds.Contains(q.Id)).ToList();
-
-                // Zapisujemy odtworzone utwory do tabeli history
-                foreach (var played in playedItems)
+                var historyEntry = new History
                 {
-                    var historyEntry = new History
-                    {
-                        SongId = played.SongId,
-                        BreakId = breakId,
-                        PlayedAt = now,
-                        Votes = played.Votes.Count
-                    };
-                    _context.Histories.Add(historyEntry);
+                    SongId = played.SongId,
+                    BreakId = breakId,
+                    PlayedAt = now,
+                    Votes = played.Votes.Count
+                };
+                _context.Histories.Add(historyEntry);
 
-                    playedTracksInfo.Add(new
-                    {
-                        songId = played.SongId,
-                        title = played.Song.Title,
-                        artist = played.Song.Artist?.Name ?? "Nieznany wykonawca",
-                        votes = played.Votes.Count
-                    });
-                }
+                playedTracksInfo.Add(new
+                {
+                    songId = played.SongId,
+                    title = played.Song.Title,
+                    artist = played.Song.Artist?.Name ?? "Nieznany wykonawca",
+                    votes = played.Votes.Count
+                });
             }
 
             // Usuwamy wszystkie QueueItems i powiązane głosy dla tej przerwy (czyścimy kolejkę)

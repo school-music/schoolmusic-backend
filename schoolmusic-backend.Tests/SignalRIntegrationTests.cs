@@ -45,7 +45,7 @@ public class SignalRIntegrationTests
             "Break time",
             null,
             Array.Empty<TopTrackDto>());
-        var playerStatus = new PlayerStatusDto(true, false, 50, false, "Url", "Song", "Artist", 0, 180000);
+        var playerStatus = new PlayerStatusDto(true, false, 50, false, "SpotifyConnect", "Song", "Artist", 0, 180000);
         var hub = server.Services.GetRequiredService<IHubContext<QueueHub>>();
 
         await hub.Clients.Group(QueueHub.KioskGroup).SendAsync("SchoolStatusChanged", status);

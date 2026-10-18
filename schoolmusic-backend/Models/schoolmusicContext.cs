@@ -38,6 +38,8 @@ public partial class schoolmusicContext : DbContext
 
     public virtual DbSet<PlaybackState> PlaybackStates { get; set; }
 
+    public virtual DbSet<SpotifyPlaybackConnection> SpotifyPlaybackConnections { get; set; }
+
     public virtual DbSet<QueueItem> QueueItems { get; set; }
 
     public virtual DbSet<Rank> Ranks { get; set; }
@@ -172,6 +174,12 @@ public partial class schoolmusicContext : DbContext
             entity.HasOne(d => d.CurrentQueueItem).WithMany(p => p.PlaybackStates)
                 .OnDelete(DeleteBehavior.SetNull)
                 .HasConstraintName("fk_playback_queue");
+        });
+
+        modelBuilder.Entity<SpotifyPlaybackConnection>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("PRIMARY");
+            entity.ToTable("spotify_playback_connection", table => table.HasCheckConstraint("chk_spotify_playback_singleton", "id = 1"));
         });
 
         modelBuilder.Entity<QueueItem>(entity =>
