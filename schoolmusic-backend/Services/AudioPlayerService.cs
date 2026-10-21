@@ -152,7 +152,7 @@ namespace schoolmusic_backend.Services
         public void VolumeDown(int step = 5) => SetVolume(_mediaPlayer.Volume - step);
 
         /// <summary>
-        /// Wycisza lub odcisza głośnik w zależności od wcześniejszego 
+        /// Wycisza lub odcisza głośnik w zależności od wcześniejszego
         /// stanu wyciszenia
         /// </summary>
         public void ToggleMute()
@@ -271,7 +271,7 @@ namespace schoolmusic_backend.Services
         }
 
         /// <summary>
-        /// Zatrzymuje odtwarzanie 
+        /// Zatrzymuje odtwarzanie
         /// </summary>
         public async Task<ServiceResult<PlayerStatusDto>> PauseAsync()
         {
@@ -307,7 +307,7 @@ namespace schoolmusic_backend.Services
         }
 
         /// <summary>
-        /// Zatrzymuje odtwarzanie, resetuje informacje o aktualnym źródle i metadanych utworu 
+        /// Zatrzymuje odtwarzanie, resetuje informacje o aktualnym źródle i metadanych utworu
         /// oraz rozsyła zaktualizowany stan odtwarzacza.
         /// </summary>
         public async Task<ServiceResult<PlayerStatusDto>> StopAsync()
@@ -327,7 +327,7 @@ namespace schoolmusic_backend.Services
         // websockety - SignalR
 
         /// <summary>
-        /// Wysyła do wszystkich klientów SignalR komunikat o zmianie głośności 
+        /// Wysyła do wszystkich klientów SignalR komunikat o zmianie głośności
         /// zawierający aktualne wartości głośności i stanu wyciszenia.
         /// </summary>
         private async Task BroadcastVolumeStatusAsync()

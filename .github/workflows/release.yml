@@ -75,11 +75,11 @@ jobs:
             --configuration Release \
             --output ./dist/portable \
             /p:UseAppHost=false
-          
+
           # Dołącz pliki pomocnicze jeśli istnieją
           [ -f docker-compose.yml ] && cp docker-compose.yml ./dist/portable/
           [ -d docs ] && cp -r docs ./dist/portable/
-          
+
           cd ./dist/portable
           zip -r "../../schoolmusic-backend-${TAG}.zip" .
           cp "../../schoolmusic-backend-${TAG}.zip" "../../schoolmusic-backend-${TAG}-portable.zip"
@@ -93,10 +93,10 @@ jobs:
             --runtime win-x64 \
             --self-contained false \
             --output ./dist/win-x64
-          
+
           [ -f docker-compose.yml ] && cp docker-compose.yml ./dist/win-x64/
           [ -d docs ] && cp -r docs ./dist/win-x64/
-          
+
           cd ./dist/win-x64
           zip -r "../../schoolmusic-backend-${TAG}-win-x64.zip" .
           cd ../..
@@ -109,10 +109,10 @@ jobs:
             --runtime linux-x64 \
             --self-contained false \
             --output ./dist/linux-x64
-          
+
           [ -f docker-compose.yml ] && cp docker-compose.yml ./dist/linux-x64/
           [ -d docs ] && cp -r docs ./dist/linux-x64/
-          
+
           tar -czvf "schoolmusic-backend-${TAG}-linux-x64.tar.gz" -C ./dist/linux-x64 .
 
       - name: Upload release archives as CI artifacts

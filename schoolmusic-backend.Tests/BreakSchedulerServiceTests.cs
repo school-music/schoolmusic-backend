@@ -3,14 +3,16 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.AspNetCore.Mvc;
 using Moq;
+using schoolmusic_backend.Controllers;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Tests;
 
-public class BreakSchedulerServiceTests
+public sealed class BreakSchedulerServiceTests
 {
     private sealed class Fixture : IAsyncDisposable
     {
@@ -18,56 +20,57 @@ public class BreakSchedulerServiceTests
         public BreakSchedulerService Service { get; }
         public Mock<IBreakService> BreakService { get; } = new();
         public Mock<IQueueService> QueueService { get; } = new();
-        public Mock<IAudioPlayerService> Player { get; } = new();
+        public Mock<ISpotifyConnectPlaybackService> Spotify { get; } = new();
+        public Mock<IAudioPlayerService> AudioPlayer { get; } = new();
 
         public Fixture()
         {
-            var databaseName = Guid.NewGuid().ToString();
             var services = new ServiceCollection();
-            services.AddDbContext<schoolmusicContext>(options =>
-                options.UseInMemoryDatabase(databaseName));
+            var databaseName = Guid.NewGuid().ToString();
+            services.AddDbContext<schoolmusicContext>(options => options.UseInMemoryDatabase(databaseName));
             services.AddScoped(_ => BreakService.Object);
             services.AddScoped(_ => QueueService.Object);
-
+            services.AddScoped(_ => Spotify.Object);
+            services.AddScoped(_ => AudioPlayer.Object);
             var statusService = new Mock<ISystemStatusService>();
             statusService.Setup(service => service.GetStatusAsync(It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new SystemStatusDto(
-                    SchoolState.Lesson,
-                    DateTime.UtcNow,
-                    null,
-                    null,
-                    0,
-                    null,
-                    null,
-                    true,
-                    null,
-                    "Lekcja",
-                    null,
-                    Array.Empty<TopTrackDto>()));
+                    SchoolState.Lesson, DateTime.UtcNow, null, null, 0, null, null,
+                    true, null, "Lekcja", null, Array.Empty<TopTrackDto>()));
             services.AddScoped(_ => statusService.Object);
 
             var hubClient = new Mock<IClientProxy>();
             hubClient.Setup(client => client.SendCoreAsync(
-                    It.IsAny<string>(),
-                    It.IsAny<object?[]>(),
-                    It.IsAny<CancellationToken>()))
+                    It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
             var hubClients = new Mock<IHubClients>();
             hubClients.Setup(clients => clients.Group(QueueHub.KioskGroup)).Returns(hubClient.Object);
+            hubClients.Setup(clients => clients.All).Returns(hubClient.Object);
             var hubContext = new Mock<IHubContext<QueueHub>>();
             hubContext.Setup(context => context.Clients).Returns(hubClients.Object);
 
             Provider = services.BuildServiceProvider();
-            var playerStatus = new PlayerStatusDto(false, false, 50, false, "None", null, null, 0, 0);
-            Player.Setup(p => p.GetStatus()).Returns(playerStatus);
-            Player.Setup(p => p.PlayFileOrUrlAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>()))
-                .ReturnsAsync(ServiceResult<PlayerStatusDto>.Ok(playerStatus));
-            Player.Setup(p => p.StopAsync()).ReturnsAsync(ServiceResult<PlayerStatusDto>.Ok(playerStatus));
-            QueueService.Setup(q => q.ArchiveBreakAsync(It.IsAny<int>()))
+            var playback = new SpotifyPlaybackSnapshot(true, true, false, "A12345678901234567890",
+                "Song", "Artist", 42, 1000, 60000, "PA Spotify");
+            Spotify.Setup(service => service.StartPlaybackAsync(
+                    It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()))
+                .Returns((IReadOnlyList<SpotifyQueueTrack> tracks, CancellationToken _) => Task.FromResult(tracks));
+            Spotify.Setup(service => service.GetPlaybackStateAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(playback);
+            Spotify.Setup(service => service.PauseAsync(It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            Spotify.Setup(service => service.ResumeAsync(It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            Spotify.Setup(service => service.SkipToNextAsync(It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            AudioPlayer.Setup(service => service.GetStatus())
+                .Returns(new PlayerStatusDto(false, false, 50, false, "None", null, null, 0, 0));
+            QueueService.Setup(service => service.ArchiveBreakAsync(It.IsAny<int>()))
                 .ReturnsAsync(ServiceResult<object>.Ok(new object()));
+
             Service = new BreakSchedulerService(
                 Provider.GetRequiredService<IServiceScopeFactory>(),
-                Player.Object,
+                AudioPlayer.Object,
                 hubContext.Object,
                 NullLogger<BreakSchedulerService>.Instance);
         }
@@ -77,31 +80,30 @@ public class BreakSchedulerServiceTests
             using var scope = Provider.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
             var now = DateTime.Now;
-            var brk = new Break
+            var breakEntity = new Break
             {
                 Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
                 StartAt = now.AddMinutes(-1), EndsAt = now.AddMinutes(5), MusicEnabled = true
             };
-            db.Breaks.Add(brk);
+            db.Breaks.Add(breakEntity);
             if (withTrack)
             {
                 var artist = new Artist { Id = 1, Name = "Artist", Source = "other" };
                 var song = new Song
                 {
-                    Id = 1, Title = "Song", ArtistId = 1, Artist = artist, Source = "other",
-                    SongUrl = "https://example.test/song.mp3", DurationMs = 60000,
-                    IsActive = true, CreatedAt = now
+                    Id = 1, Title = "Song", ArtistId = 1, Artist = artist, Source = "spotify",
+                    SpotifyId = "A12345678901234567890", SongUrl = "https://example.test/song.mp3",
+                    DurationMs = 60000, IsActive = true, CreatedAt = now
                 };
                 db.Artists.Add(artist);
                 db.Songs.Add(song);
                 db.QueueItems.Add(new QueueItem
                 {
-                    Id = 1, BreakId = 1, Break = brk, SongId = 1, Song = song,
-                    Status = "queued", ModerationStatus = "approved", OrderIndex = 1,
-                    CreatedAt = now
+                    Id = 1, BreakId = 1, Break = breakEntity, SongId = 1, Song = song,
+                    Status = "queued", ModerationStatus = "approved", OrderIndex = 1, CreatedAt = now
                 });
                 db.PlaybackStates.Add(new PlaybackState { Id = 1, CurrentQueueItemId = 1, StartedAt = now, UpdatedAt = now });
-                BreakService.Setup(s => s.CalculateBreak(1, It.IsAny<int>(), It.IsAny<List<QueueItem>>()))
+                BreakService.Setup(service => service.CalculateBreak(1, It.IsAny<int>(), It.IsAny<List<QueueItem>>()))
                     .Returns(new ScheduledBreakPlan(1, 300, 60, 240, [
                         new ScheduledTrackDto(1, 1, "Song", "Artist", "", 60000, 0, 0, 1)
                     ]));
@@ -112,8 +114,7 @@ public class BreakSchedulerServiceTests
         public async Task Tick()
         {
             var tick = typeof(BreakSchedulerService).GetMethod("TickAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
-            var task = (Task)tick.Invoke(Service, [CancellationToken.None])!;
-            await task;
+            await (Task)tick.Invoke(Service, [CancellationToken.None])!;
         }
 
         public async ValueTask DisposeAsync()
@@ -124,7 +125,7 @@ public class BreakSchedulerServiceTests
     }
 
     [Fact]
-    public async Task Tick_StartsAnActiveMusicBreakAndPersistsPlaybackState()
+    public async Task Tick_SubmitsTheApprovedSpotifyQueueInPlanOrderAndPersistsNowPlaying()
     {
         await using var fixture = new Fixture();
         await fixture.SeedActiveBreak();
@@ -133,12 +134,129 @@ public class BreakSchedulerServiceTests
 
         Assert.Equal(1, fixture.Service.GetActiveBreakId());
         Assert.Equal(1, fixture.Service.GetCurrentPlan()?.BreakId);
-        fixture.Player.Verify(p => p.PlayFileOrUrlAsync("https://example.test/song.mp3", "Song", "Artist"), Times.Once);
-        fixture.QueueService.Verify(q => q.BroadcastQueueAsync(1), Times.Once);
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.Is<IReadOnlyList<SpotifyQueueTrack>>(tracks =>
+                tracks.Count == 1 && tracks[0].SpotifyId == "A12345678901234567890"),
+            It.IsAny<CancellationToken>()), Times.Once);
+        fixture.QueueService.Verify(service => service.BroadcastQueueAsync(1), Times.AtLeastOnce);
         using var scope = fixture.Provider.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
         Assert.Equal("playing", (await db.QueueItems.SingleAsync()).Status);
         Assert.Equal(1, (await db.PlaybackStates.SingleAsync()).CurrentQueueItemId);
+    }
+
+    [Fact]
+    public async Task Tick_SubmitsMultipleTracksInCalculatedOrder()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak(withTrack: false);
+        using (var scope = fixture.Provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+            var breakEntity = await db.Breaks.SingleAsync();
+            for (var id = 1; id <= 2; id++)
+            {
+                var artist = new Artist { Id = id, Name = $"Artist {id}", Source = "spotify" };
+                var song = new Song
+                {
+                    Id = id, Title = $"Song {id}", ArtistId = id, Artist = artist,
+                    Source = "spotify", SpotifyId = id == 1 ? "B12345678901234567890" : "C12345678901234567890", DurationMs = 60000,
+                    IsActive = true, CreatedAt = DateTime.Now
+                };
+                db.Artists.Add(artist);
+                db.Songs.Add(song);
+                db.QueueItems.Add(new QueueItem
+                {
+                    Id = id, BreakId = 1, Break = breakEntity, SongId = id, Song = song,
+                    Status = "queued", ModerationStatus = "approved", OrderIndex = id, CreatedAt = DateTime.Now
+                });
+            }
+            await db.SaveChangesAsync();
+        }
+        fixture.BreakService.Setup(service => service.CalculateBreak(1, It.IsAny<int>(), It.IsAny<List<QueueItem>>()))
+            .Returns(new ScheduledBreakPlan(1, 300, 120, 180, [
+                new ScheduledTrackDto(2, 2, "Song 2", "Artist 2", "", 60000, 0, 0, 1),
+                new ScheduledTrackDto(1, 1, "Song 1", "Artist 1", "", 60000, 0, 60, 2)
+            ]));
+
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.Is<IReadOnlyList<SpotifyQueueTrack>>(tracks =>
+                tracks.Count == 2 &&
+                tracks[0].SpotifyId == "C12345678901234567890" &&
+                tracks[1].SpotifyId == "B12345678901234567890"),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Tick_MarksSpotifyUnplayableTracksSkippedAndContinuesRemainingQueue()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak(withTrack: false);
+        using (var scope = fixture.Provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+            var breakEntity = await db.Breaks.SingleAsync();
+            for (var id = 1; id <= 2; id++)
+            {
+                var artist = new Artist { Id = id, Name = $"Artist {id}", Source = "spotify" };
+                var song = new Song
+                {
+                    Id = id, Title = $"Song {id}", ArtistId = id, Artist = artist,
+                    Source = "spotify", SpotifyId = id == 1 ? "B12345678901234567890" : "C12345678901234567890",
+                    DurationMs = 60000, IsActive = true, CreatedAt = DateTime.Now
+                };
+                db.Artists.Add(artist);
+                db.Songs.Add(song);
+                db.QueueItems.Add(new QueueItem
+                {
+                    Id = id, BreakId = 1, Break = breakEntity, SongId = id, Song = song,
+                    Status = "queued", ModerationStatus = "approved", OrderIndex = id, CreatedAt = DateTime.Now
+                });
+            }
+            await db.SaveChangesAsync();
+        }
+        fixture.BreakService.Setup(service => service.CalculateBreak(1, It.IsAny<int>(), It.IsAny<List<QueueItem>>()))
+            .Returns(new ScheduledBreakPlan(1, 300, 120, 180, [
+                new ScheduledTrackDto(1, 1, "Song 1", "Artist 1", "", 60000, 0, 0, 1),
+                new ScheduledTrackDto(2, 2, "Song 2", "Artist 2", "", 60000, 0, 60, 2)
+            ]));
+        fixture.Spotify.Setup(service => service.StartPlaybackAsync(
+                It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()))
+            .Returns((IReadOnlyList<SpotifyQueueTrack> tracks, CancellationToken _) =>
+                Task.FromResult<IReadOnlyList<SpotifyQueueTrack>>(tracks.Take(1).ToArray()));
+        fixture.Spotify.Setup(service => service.GetPlaybackStateAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpotifyPlaybackSnapshot(true, true, false, "B12345678901234567890",
+                "Song 1", "Artist 1", 42, 1000, 60000, "PA Spotify"));
+
+        await fixture.Tick();
+
+        using var verifyScope = fixture.Provider.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+        var statuses = await verifyDb.QueueItems.OrderBy(item => item.Id).Select(item => item.Status).ToListAsync();
+        Assert.Equal(new[] { "playing", "skipped" }, statuses);
+    }
+
+    [Fact]
+    public async Task Tick_RetriesSpotifyWhenUnavailableWithoutUsingAnotherPlayer()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak();
+        fixture.Spotify.SetupSequence(service => service.StartPlaybackAsync(
+                It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new SpotifyPlaybackException(503, "device unavailable"))
+            .Returns(Task.FromResult<IReadOnlyList<SpotifyQueueTrack>>(
+                [new SpotifyQueueTrack(1, "A12345678901234567890", "Song", "Artist")]));
+        fixture.Spotify.Setup(service => service.GetPlaybackStateAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpotifyPlaybackSnapshot(false, false, false, null, null, null, 0, 0, 0, null));
+
+        await fixture.Tick();
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+        Assert.Equal(1, fixture.Service.GetActiveBreakId());
     }
 
     [Fact]
@@ -150,19 +268,25 @@ public class BreakSchedulerServiceTests
         {
             var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
             var weekday = (sbyte)DateTime.Now.DayOfWeek;
-            db.WeeklySchedules.Add(new WeeklySchedule { Weekday = weekday == 0 ? (sbyte)7 : weekday, MusicEnabled = false });
+            db.WeeklySchedules.Add(new WeeklySchedule
+            {
+                Weekday = weekday == 0 ? (sbyte)7 : weekday,
+                MusicEnabled = false
+            });
             await db.SaveChangesAsync();
         }
 
         await fixture.Tick();
 
         Assert.Null(fixture.Service.GetActiveBreakId());
-        fixture.BreakService.Verify(s => s.CalculateBreak(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<List<QueueItem>>()), Times.Never);
-        fixture.Player.Verify(p => p.PlayFileOrUrlAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>()), Times.Never);
+        fixture.BreakService.Verify(service => service.CalculateBreak(
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<List<QueueItem>>()), Times.Never);
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
-    public async Task Tick_CleansUpWhenActiveBreakHasEnded()
+    public async Task Tick_PausesAtBreakEndAndClearsPlaybackState()
     {
         await using var fixture = new Fixture();
         await fixture.SeedActiveBreak();
@@ -170,8 +294,8 @@ public class BreakSchedulerServiceTests
         using (var scope = fixture.Provider.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
-            var brk = await db.Breaks.SingleAsync();
-            brk.EndsAt = DateTime.Now.AddMinutes(-1);
+            var breakEntity = await db.Breaks.SingleAsync();
+            breakEntity.EndsAt = DateTime.Now.AddMinutes(-1);
             await db.SaveChangesAsync();
         }
 
@@ -179,8 +303,8 @@ public class BreakSchedulerServiceTests
 
         Assert.Null(fixture.Service.GetActiveBreakId());
         Assert.Null(fixture.Service.GetCurrentPlan());
-        fixture.Player.Verify(p => p.StopAsync(), Times.Once);
-        fixture.QueueService.Verify(q => q.ArchiveBreakAsync(1), Times.Once);
+        fixture.Spotify.Verify(service => service.PauseAsync(It.IsAny<CancellationToken>()), Times.Once);
+        fixture.QueueService.Verify(service => service.ArchiveBreakAsync(1), Times.Once);
         using var verifyScope = fixture.Provider.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<schoolmusicContext>();
         var playback = await verifyDb.PlaybackStates.SingleAsync();
@@ -190,7 +314,47 @@ public class BreakSchedulerServiceTests
     }
 
     [Fact]
-    public async Task SkipCurrentTrack_MarksQueueItemSkippedAndStopsPlayback()
+    public async Task Tick_PausesSpotifyDuringLocalPlaybackAndResumesWhenItEnds()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak();
+        await fixture.Tick();
+        fixture.AudioPlayer.Setup(service => service.GetStatus())
+            .Returns(new PlayerStatusDto(true, false, 50, false, "LocalAudio", "Assembly", null, 0, 1000));
+
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.PauseAsync(It.IsAny<CancellationToken>()), Times.Once);
+        fixture.AudioPlayer.Setup(service => service.GetStatus())
+            .Returns(new PlayerStatusDto(false, false, 50, false, "None", null, null, 0, 0));
+
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.ResumeAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task AdminManualFilePlaybackPausesSpotifyBeforeStartingVlc()
+    {
+        var spotify = new Mock<ISpotifyConnectPlaybackService>();
+        var player = new Mock<IAudioPlayerService>();
+        spotify.Setup(service => service.PauseAsync(It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        player.Setup(service => service.PlayFileOrUrlAsync("/recordings/assembly.mp4", "Assembly", "School"))
+            .ReturnsAsync(ServiceResult<PlayerStatusDto>.Ok(
+                new PlayerStatusDto(true, false, 50, false, "LocalAudio", "Assembly", "School", 0, 1000)));
+        var controller = new PlayerController(spotify.Object, player.Object, Mock.Of<IBreakSchedulerService>());
+
+        var result = await controller.PlayFile(
+            new PlayFileDto("/recordings/assembly.mp4", "Assembly", "School"), CancellationToken.None);
+
+        Assert.Equal(200, Assert.IsType<ObjectResult>(result).StatusCode);
+        spotify.Verify(service => service.PauseAsync(It.IsAny<CancellationToken>()), Times.Once);
+        player.Verify(service => service.PlayFileOrUrlAsync(
+            "/recordings/assembly.mp4", "Assembly", "School"), Times.Once);
+    }
+
+    [Fact]
+    public async Task SkipCurrentTrack_MarksItSkippedAndUsesSpotifyNext()
     {
         await using var fixture = new Fixture();
         await fixture.SeedActiveBreak();
@@ -201,8 +365,7 @@ public class BreakSchedulerServiceTests
         using var scope = fixture.Provider.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
         Assert.Equal("skipped", (await db.QueueItems.SingleAsync()).Status);
-        fixture.Player.Verify(p => p.StopAsync(), Times.Once);
-        Assert.Equal(1, fixture.Service.GetActiveBreakId());
+        fixture.Spotify.Verify(service => service.SkipToNextAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -213,6 +376,7 @@ public class BreakSchedulerServiceTests
 
         Assert.Null(fixture.Service.GetCurrentPlan());
         Assert.Null(fixture.Service.GetActiveBreakId());
-        fixture.BreakService.Verify(s => s.CalculateBreak(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<List<QueueItem>>()), Times.Never);
+        fixture.BreakService.Verify(service => service.CalculateBreak(
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<List<QueueItem>>()), Times.Never);
     }
 }

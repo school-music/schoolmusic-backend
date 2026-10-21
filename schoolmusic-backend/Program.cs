@@ -40,6 +40,7 @@ builder.Services.AddAuthentication(options=>
 
 // Add services to the container.
 builder.Services.AddControllers();
+builder.Services.AddHttpClient("Spotify", client => client.Timeout = TimeSpan.FromSeconds(10));
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 
@@ -75,6 +76,7 @@ builder.Services.AddScoped<IRadioStatusService, RadioStatusService>();
 builder.Services.AddScoped<IQueueService, QueueService>();
 builder.Services.AddScoped<IRankingsService, RankingsService>();
 builder.Services.AddSingleton<IAudioPlayerService, AudioPlayerService>();
+builder.Services.AddSingleton<ISpotifyConnectPlaybackService, SpotifyConnectPlaybackService>();
 builder.Services.AddSingleton<BreakSchedulerService>();
 builder.Services.AddSingleton<IBreakSchedulerService>(sp => sp.GetRequiredService<BreakSchedulerService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<BreakSchedulerService>());

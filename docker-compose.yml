@@ -40,6 +40,11 @@ services:
       - Jwt__Issuer=SchoolMusicAPI
       - Jwt__Audience=SchoolMusicApp
       - Jwt__Key=schoolmusic_super_secret_jwt_key_2026_dev!
+      - Spotify__ClientId=${SPOTIFY_CLIENT_ID:-}
+      - Spotify__ClientSecret=${SPOTIFY_CLIENT_SECRET:-}
+      - Spotify__RedirectUri=${SPOTIFY_REDIRECT_URI:-}
+      - Spotify__DeviceName=${SPOTIFY_DEVICE_NAME:-PA Spotify}
+      - Spotify__TokenEncryptionKey=${SPOTIFY_TOKEN_ENCRYPTION_KEY:-}
       - Cors__AllowedOrigins__0=http://localhost:3000
       - Cors__AllowedOrigins__1=http://localhost:5173
       - Cors__AllowedOrigins__2=http://localhost:8080

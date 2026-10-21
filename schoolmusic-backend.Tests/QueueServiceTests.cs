@@ -32,11 +32,10 @@ public class QueueServiceTests
         mockClients.Setup(c => c.Group(It.IsAny<string>())).Returns(mockClientProxy.Object);
         mockHub.Setup(h => h.Clients).Returns(mockClients.Object);
 
-        var mockBreakService = new Mock<IBreakService>();
         songSource ??= new Mock<ISongSourceService>();
         songSource.SetupGet(source => source.IsConfigured).Returns(spotifyConfigured);
 
-        var service = new QueueService(context, redisConnection.Object, mockHub.Object, mockBreakService.Object, songSource.Object);
+        var service = new QueueService(context, redisConnection.Object, mockHub.Object, songSource.Object);
         return (service, context);
     }
 
@@ -237,5 +236,44 @@ public class QueueServiceTests
             It.IsAny<RedisValue>(),
             When.Always,
             CommandFlags.None), Times.Once);
+    }
+
+    [Fact]
+    public async Task ArchiveBreakAsync_RecordsOnlyTracksReportedAsPlayedBySpotifyPolling()
+    {
+        var (service, context) = CreateService(nameof(ArchiveBreakAsync_RecordsOnlyTracksReportedAsPlayedBySpotifyPolling));
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now.AddMinutes(-10), EndsAt = now, MusicEnabled = true
+        };
+        var artist = new Artist { Id = 1, Name = "Artist", Source = "spotify" };
+        context.Breaks.Add(breakEntity);
+        context.Artists.Add(artist);
+        for (var id = 1; id <= 3; id++)
+        {
+            var song = new Song
+            {
+                Id = id, Title = $"Track {id}", ArtistId = 1, Artist = artist,
+                Source = "spotify", SpotifyId = $"track{id}", DurationMs = 60000, CreatedAt = now
+            };
+            context.Songs.Add(song);
+            context.QueueItems.Add(new QueueItem
+            {
+                Id = id, BreakId = 1, Break = breakEntity, SongId = id, Song = song,
+                ModerationStatus = "approved",
+                Status = id == 1 ? "played" : id == 2 ? "queued" : "playing",
+                OrderIndex = id, CreatedAt = now
+            });
+        }
+        await context.SaveChangesAsync();
+
+        var result = await service.ArchiveBreakAsync(1);
+
+        Assert.True(result.Success);
+        Assert.Equal(new[] { 1, 3 }, await context.Histories.OrderBy(item => item.SongId)
+            .Select(item => item.SongId).ToArrayAsync());
+        Assert.Empty(await context.QueueItems.ToListAsync());
     }
 }

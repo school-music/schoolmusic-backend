@@ -2,227 +2,210 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using schoolmusic_backend.Services;
 
+namespace schoolmusic_backend.Controllers;
 
-namespace schoolmusic_backend.Controllers
+public sealed record SetVolumeDto(int Volume);
+public sealed record PlayFileDto(string PathOrUrl, string? Title, string? Artist);
+
+[ApiController]
+[Route("api/player")]
+[Authorize]
+public sealed class PlayerController(
+    ISpotifyConnectPlaybackService spotify,
+    IAudioPlayerService audioPlayer,
+    IBreakSchedulerService scheduler) : ControllerBase
 {
-    public record SetVolumeDto(
-        int Volume
-    );
-    public record PlayFileDto(
-        string PathOrUrl,
-        string? Title,
-        string? Artist
-    );
-
-    /// <summary>
-    /// Kontroler API do zarządzania odtwarzaczem audio. Udostępnia akcje do pobierania statusu, sterowania głośnością,
-    /// wyciszania, pauzowania, wznawiania, zatrzymywania, odtwarzania plików lub URL oraz przesyłania plików.
-    /// </summary>
-    [Route("api/[controller]")]
-    [ApiController]
-    [Authorize]
-    public class PlayerController : Controller
+    [HttpGet("status")]
+    [AllowAnonymous]
+    public async Task<IActionResult> GetStatus(CancellationToken cancellationToken)
     {
-        private readonly IAudioPlayerService _playerServices;
-        private readonly IBreakSchedulerService _schedulerService;
+        var localStatus = audioPlayer.GetStatus();
+        if (localStatus.Source != "None")
+            return Ok(localStatus);
 
-        public PlayerController(IAudioPlayerService audioPlayerService, IBreakSchedulerService schedulerService)
+        try
         {
-            _playerServices = audioPlayerService;
-            _schedulerService = schedulerService;
+            return Ok(await spotify.GetStatusAsync(cancellationToken));
         }
-        /// <summary>
-        /// Przekształca obiekt ServiceResult na odpowiedź HTTP (IActionResult)
-        /// </summary>
-        private IActionResult FromResult<T>(ServiceResult<T> result)
+        catch (SpotifyPlaybackException ex)
         {
-            return StatusCode(result.StatusCode, result.Success ? result.Data : new
-            {
-                Message = result.Message
-            });
-        }
-
-        /// <summary>
-        /// Zwraca aktualny status odtwarzania
-        /// </summary>
-        [HttpGet("status")]
-        [AllowAnonymous]
-        public IActionResult GetStatus()
-        {
-            return Ok(_playerServices.GetStatus());
-        }
-
-        /// <summary>
-        /// Ustawia głośność na przesłaną
-        /// </summary>
-        [HttpPost("volume")]
-        [Authorize(Roles ="mod,admin,head_admin")]
-        public IActionResult SetVolume([FromBody] SetVolumeDto dto)
-        {
-            _playerServices.SetVolume(dto.Volume);
-            return Ok(new
-            {
-                volume = _playerServices.GetVolume(),
-                isMuted = _playerServices.GetStatus().IsMuted
-            });
-        }
-
-        /// <summary>
-        /// Zwiększa głośność o podaną
-        /// </summary>
-        /// <param name="step">O ile ma zwiększyć głośność (domyślnie 5)</param>
-        [HttpPost("volume/up")]
-        [Authorize(Roles = "mod,admin,head_admin")]
-        public IActionResult VolumeUp([FromQuery] int step = 5)
-        {
-            _playerServices.VolumeUp(step);
-            return Ok(new
-            {
-                volume = _playerServices.GetVolume(),
-                isMuted = _playerServices.GetStatus().IsMuted
-            });
-        }
-
-        /// <summary>
-        /// Zmniejsza głośność o podaną
-        /// </summary>
-        /// <param name="step">O ile ma zmniejszyć głośność (domyślnie 5)</param>
-        [HttpPost("volume/down")]
-        [Authorize(Roles = "mod,admin,head_admin")]
-        public IActionResult VolumeDown([FromQuery] int step = 5)
-        {
-            _playerServices.VolumeDown(step);
-            return Ok(new
-            {
-                volume = _playerServices.GetVolume(),
-                isMuted = _playerServices.GetStatus().IsMuted
-            });
-        }
-
-        /// <summary>
-        /// Wycisza lub odcisza głośnik
-        /// </summary>
-        [HttpPost("mute")]
-        [Authorize(Roles ="mod,admin,head_admin")]
-        public IActionResult ToggleMute()
-        {
-            _playerServices.ToggleMute();
-            return Ok(new
-            {
-                volume = _playerServices.GetVolume(),
-                isMuted = _playerServices.GetStatus().IsMuted
-            });
-        }
-        /// <summary>
-        /// Odtwarza plik lub url
-        /// </summary>
-        [HttpPost("play-file")]
-        [Authorize(Roles ="mod,admin,head_admin")]
-        public async Task<IActionResult> PlayFile([FromBody] PlayFileDto dto)
-        {
-            var result = await _playerServices.PlayFileOrUrlAsync(dto.PathOrUrl, dto.Title, dto.Artist);
-            return FromResult(result);
-        }
-
-        /// <summary>
-        /// Wstrzymuje odtwarzanie
-        /// </summary>
-        [HttpPost("pause")]
-        [Authorize(Roles = "mod,admin,head_admin")]
-        public async Task<IActionResult> Pause()
-        {
-            var result = await _playerServices.PauseAsync();
-            return FromResult(result);
-        }
-
-        /// <summary>
-        /// Wznawia odtwarzanie
-        /// </summary>
-        [HttpPost("resume")]
-        [Authorize(Roles = "mod,admin,head_admin")]
-        public async Task<IActionResult> Resume()
-        {
-            var result = await _playerServices.ResumeAsync();
-            return FromResult(result);
-        }
-
-        /// <summary>
-        /// Zatrzymuje odtwarzanie przy użyciu serwisu odtwarzacza
-        /// </summary>
-        /// <returns>IActionResult zawierający wynik asynchronicznej operacji zatrzymania</returns>
-        [HttpPost("stop")]
-        [Authorize(Roles ="mod,admin,head_admin")]
-        public async Task<IActionResult> Stop()
-        {
-            var result = await _playerServices.StopAsync();
-            return FromResult(result);
-        }
-
-        /// <summary>
-        /// Pomija bieżący odtwarzany utwór i przełącza na kolejny z zaplanowanej kolejki
-        /// </summary>
-        [HttpPost("skip")]
-        [Authorize(Roles = "mod,admin,head_admin")]
-        public async Task<IActionResult> Skip()
-        {
-            var skipped = await _schedulerService.SkipCurrentTrackAsync();
-            return Ok(new
-            {
-                Message = "Pominięto bieżący utwór.",
-                Success = skipped,
-                PlayerStatus = _playerServices.GetStatus()
-            });
-        }
-
-        /// <summary>
-        /// Przesyła plik audio, zapisuje go na serwerze i uruchamia jego odtwarzanie
-        /// </summary>
-        /// <remarks>Maksymalny rozmiar żądania: 100 MB. Pliki zapisywane są w katalogu 'recordings'</remarks>
-        /// <returns>IActionResult: 400 Bad Request przy braku pliku lub niedozwolonym formacie; w przeciwnym razie wynik
-        /// działania odtwarzacza.</returns>
-        [HttpPost("upload-and-play")]
-        [RequestSizeLimit(100_000_000)] // limit 100MB
-        [Authorize(Roles ="mod,admin,head_admin")]
-        public async Task<IActionResult> UploadAndPlay(
-            IFormFile file,
-            [FromForm] string? title = null,
-            [FromForm] string? artist = null
-        )
-        {
-            if(file == null || file.Length == 0)
-            {
-                return BadRequest(new
-                {
-                    Message = "Nie przesłano żadnego pliku"
-                });
-            }
-            string[] allowedExtensions = new string[]
-            {
-                ".mp3", ".wav", ".ogg", ".flac", ".m4a"
-            };
-            string extension = Path.GetExtension(file.FileName).ToLowerInvariant();
-            if (!allowedExtensions.Contains(extension))
-            {
-                return BadRequest(new
-                {
-                    Message = "Niedozwolony format pliku. Dozwolone są tylko mp3, wav, ogg, flac, m4a"
-                });
-            }
-            var recordingsDir = Path.Combine(AppContext.BaseDirectory, "recordings");
-            if (!Directory.Exists(recordingsDir))
-            {
-                Directory.CreateDirectory(recordingsDir);
-            }
-            string safeFileName = $"{Guid.NewGuid()}_{Path.GetFileName(file.FileName)}";
-            string filePath = Path.Combine(recordingsDir, safeFileName);
-            await using(FileStream stream = new FileStream(filePath, FileMode.Create))
-            {
-                await file.CopyToAsync(stream);
-            }
-
-            var effectiveTitle = string.IsNullOrWhiteSpace(title) ? Path.GetFileNameWithoutExtension(file.FileName) : title;
-            var result = await _playerServices.PlayFileOrUrlAsync(filePath, effectiveTitle, artist ?? "Nieznany wykonawca");
-            return FromResult(result);
+            return StatusCode(ex.StatusCode, new { Message = ex.Message });
         }
     }
+
+    [HttpPost("volume")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public async Task<IActionResult> SetVolume([FromBody] SetVolumeDto dto, CancellationToken cancellationToken)
+    {
+        if (audioPlayer.GetStatus().Source != "None")
+        {
+            audioPlayer.SetVolume(dto.Volume);
+            return Ok(audioPlayer.GetStatus());
+        }
+
+        try
+        {
+            await spotify.SetVolumeAsync(dto.Volume, cancellationToken);
+            return Ok(await spotify.GetStatusAsync(cancellationToken));
+        }
+        catch (SpotifyPlaybackException ex)
+        {
+            return StatusCode(ex.StatusCode, new { Message = ex.Message });
+        }
+    }
+
+    [HttpPost("volume/up")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public Task<IActionResult> VolumeUp([FromQuery] int step = 5, CancellationToken cancellationToken = default) =>
+        AdjustVolumeAsync(Math.Clamp(step, 0, 100), cancellationToken);
+
+    [HttpPost("volume/down")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public Task<IActionResult> VolumeDown([FromQuery] int step = 5, CancellationToken cancellationToken = default) =>
+        AdjustVolumeAsync(-Math.Clamp(step, 0, 100), cancellationToken);
+
+    [HttpPost("upload-and-play")]
+    [RequestSizeLimit(100_000_000)]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public async Task<IActionResult> UploadAndPlay(
+        IFormFile file,
+        [FromForm] string? title = null,
+        [FromForm] string? artist = null)
+    {
+        if (file == null || file.Length == 0)
+            return BadRequest(new { Message = "No file was uploaded." });
+
+        var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
+        if (extension is not (".mp3" or ".wav" or ".ogg" or ".flac" or ".m4a" or ".mp4"))
+            return BadRequest(new { Message = "Unsupported format. Allowed: mp3, wav, ogg, flac, m4a, mp4." });
+
+        var directory = Path.Combine(AppContext.BaseDirectory, "recordings");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"{Guid.NewGuid()}_{Path.GetFileName(file.FileName)}");
+        await using (var stream = System.IO.File.Create(path))
+            await file.CopyToAsync(stream);
+
+        try
+        {
+            await spotify.PauseAsync();
+        }
+        catch (Exception ex) when (ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException)
+        {
+            // Local playback remains available when Spotify is disconnected.
+        }
+
+        return FromAudioResult(await audioPlayer.PlayFileOrUrlAsync(
+            path,
+            string.IsNullOrWhiteSpace(title) ? Path.GetFileNameWithoutExtension(file.FileName) : title,
+            artist ?? "Unknown artist"));
+    }
+
+    [HttpPost("pause")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public Task<IActionResult> Pause(CancellationToken cancellationToken) =>
+        audioPlayer.GetStatus().Source != "None"
+            ? AudioCommandAsync(audioPlayer.PauseAsync())
+            : PlaybackCommandAsync(spotify.PauseAsync(cancellationToken), cancellationToken);
+
+    [HttpPost("resume")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public Task<IActionResult> Resume(CancellationToken cancellationToken) =>
+        audioPlayer.GetStatus().Source != "None"
+            ? AudioCommandAsync(audioPlayer.ResumeAsync())
+            : PlaybackCommandAsync(spotify.ResumeAsync(cancellationToken), cancellationToken);
+
+    [HttpPost("play-file")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public async Task<IActionResult> PlayFile([FromBody] PlayFileDto dto, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await spotify.PauseAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException)
+        {
+            // Local playback must remain available when Spotify is disconnected.
+        }
+
+        return FromAudioResult(await audioPlayer.PlayFileOrUrlAsync(dto.PathOrUrl, dto.Title, dto.Artist));
+    }
+
+    [HttpPost("stop")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public async Task<IActionResult> Stop(CancellationToken cancellationToken)
+    {
+        var result = await audioPlayer.StopAsync();
+        try
+        {
+            await spotify.PauseAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException)
+        {
+            // Stopping local playback does not depend on the Connect device being available.
+        }
+
+        return FromAudioResult(result);
+    }
+
+    [HttpPost("mute")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public IActionResult ToggleMute()
+    {
+        audioPlayer.ToggleMute();
+        return Ok(audioPlayer.GetStatus());
+    }
+
+    [HttpPost("skip")]
+    [Authorize(Roles = "mod,admin,head_admin")]
+    public async Task<IActionResult> Skip(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var skipped = await scheduler.SkipCurrentTrackAsync();
+            return Ok(new { Success = skipped, PlayerStatus = await spotify.GetStatusAsync(cancellationToken) });
+        }
+        catch (SpotifyPlaybackException ex)
+        {
+            return StatusCode(ex.StatusCode, new { Message = ex.Message });
+        }
+    }
+
+    private async Task<IActionResult> AdjustVolumeAsync(int delta, CancellationToken cancellationToken)
+    {
+        if (audioPlayer.GetStatus().Source != "None")
+        {
+            audioPlayer.SetVolume(audioPlayer.GetVolume() + delta);
+            return Ok(audioPlayer.GetStatus());
+        }
+
+        try
+        {
+            var status = await spotify.GetStatusAsync(cancellationToken);
+            await spotify.SetVolumeAsync(status.Volume + delta, cancellationToken);
+            return Ok(await spotify.GetStatusAsync(cancellationToken));
+        }
+        catch (SpotifyPlaybackException ex)
+        {
+            return StatusCode(ex.StatusCode, new { Message = ex.Message });
+        }
+    }
+
+    private async Task<IActionResult> PlaybackCommandAsync(Task command, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await command;
+            return Ok(await spotify.GetStatusAsync(cancellationToken));
+        }
+        catch (SpotifyPlaybackException ex)
+        {
+            return StatusCode(ex.StatusCode, new { Message = ex.Message });
+        }
+    }
+
+    private async Task<IActionResult> AudioCommandAsync(Task<ServiceResult<PlayerStatusDto>> command) =>
+        FromAudioResult(await command);
+
+    private IActionResult FromAudioResult(ServiceResult<PlayerStatusDto> result) =>
+        StatusCode(result.StatusCode, result.Success ? result.Data : new { Message = result.Message });
 }
