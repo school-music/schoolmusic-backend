@@ -59,7 +59,7 @@ namespace schoolmusic_backend.Services
             }
         }
 
-        public async Task<IEnumerable<ExternalTrackDto>> SearchTracksAsync(string query, int limit = 20)
+        public async Task<IEnumerable<ExternalTrackDto>> SearchTracksAsync(string query, int limit = 10)
         {
             if (!IsConfigured || string.IsNullOrWhiteSpace(query))
             {
@@ -74,7 +74,7 @@ namespace schoolmusic_backend.Services
 
                 var searchRequest = new SearchRequest(SearchRequest.Types.Track, query)
                 {
-                    Limit = Math.Clamp(limit, 1, 50)
+                    Limit = Math.Clamp(limit, 1, 10)
                 };
 
                 var searchResult = await client.Search.Item(searchRequest);
@@ -112,7 +112,19 @@ namespace schoolmusic_backend.Services
                 var client = await GetClientAsync();
                 if (client == null) return null;
 
-                var track = await client.Tracks.Get(externalId);
+                var cleanId = externalId.Trim();
+                if (cleanId.StartsWith("spotify:track:", StringComparison.OrdinalIgnoreCase))
+                {
+                    cleanId = cleanId["spotify:track:".Length..];
+                }
+                else if (cleanId.Contains("/track/"))
+                {
+                    var part = cleanId[(cleanId.IndexOf("/track/", StringComparison.OrdinalIgnoreCase) + 7)..];
+                    var qIndex = part.IndexOf('?');
+                    cleanId = qIndex >= 0 ? part[..qIndex] : part;
+                }
+
+                var track = await client.Tracks.Get(cleanId);
                 if (track == null) return null;
 
                 return new ExternalTrackDto(
