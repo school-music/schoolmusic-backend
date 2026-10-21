@@ -10,6 +10,7 @@ public interface IBreakSchedulerService
     Task<bool> SkipCurrentTrackAsync();
     ScheduledBreakPlan? GetCurrentPlan();
     int? GetActiveBreakId();
+    Task ProcessTickAsync(CancellationToken stoppingToken = default);
 }
 
 public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerService
@@ -17,6 +18,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHubContext<QueueHub> _hubContext;
     private readonly ILogger<BreakSchedulerService> _logger;
+    private readonly IAudioPlayerService? _audioPlayer;
     private readonly object _planLock = new();
     private SystemStatusDto? _lastKioskStatus;
     private PlayerStatusDto? _lastPlayerStatus;
@@ -37,6 +39,16 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         _logger = logger;
     }
 
+    public BreakSchedulerService(
+        IServiceScopeFactory scopeFactory,
+        IAudioPlayerService audioPlayer,
+        IHubContext<QueueHub> hubContext,
+        ILogger<BreakSchedulerService> logger)
+        : this(scopeFactory, hubContext, logger)
+    {
+        _audioPlayer = audioPlayer;
+    }
+
     public ScheduledBreakPlan? GetCurrentPlan()
     {
         lock (_planLock) return _currentPlan;
@@ -46,6 +58,8 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     {
         lock (_planLock) return _activeBreakId;
     }
+
+    public Task ProcessTickAsync(CancellationToken stoppingToken = default) => TickAsync(stoppingToken);
 
     public async Task<bool> SkipCurrentTrackAsync()
     {
@@ -103,15 +117,40 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
         var breakService = scope.ServiceProvider.GetRequiredService<IBreakService>();
         var queueService = scope.ServiceProvider.GetRequiredService<IQueueService>();
-        var spotify = scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>();
-
-        if (_pausePending)
-            await RetryPauseAsync(spotify, cancellationToken);
-
         var now = DateTime.Now;
         var today = DateOnly.FromDateTime(now);
         var weekday = (sbyte)now.DayOfWeek;
         if (weekday == 0) weekday = 7;
+
+        var pendingEvent = await db.SpecialEvents
+            .Where(item => item.EventStatus == "pending" && item.StartsAt <= now)
+            .OrderBy(item => item.StartsAt)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (pendingEvent != null)
+        {
+            pendingEvent.EventStatus = "playing";
+            await db.SaveChangesAsync(cancellationToken);
+            var player = _audioPlayer ?? scope.ServiceProvider.GetRequiredService<IAudioPlayerService>();
+            var result = await player.PlayFileOrUrlAsync(
+                pendingEvent.FileUrl,
+                pendingEvent.Title ?? "School announcement",
+                "School announcement");
+            if (result.Success)
+            {
+                pendingEvent.EventStatus = "done";
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            await PauseSpotifyForLocalPlaybackAsync(scope.ServiceProvider, cancellationToken);
+            await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            return;
+        }
+
+        var localPlayer = _audioPlayer ?? scope.ServiceProvider.GetService<IAudioPlayerService>();
+        if (localPlayer?.GetStatus().Source is not null and not "None")
+        {
+            await PauseSpotifyForLocalPlaybackAsync(scope.ServiceProvider, cancellationToken);
+            return;
+        }
 
         var isDayOff = await db.ExceptionDays.AnyAsync(item =>
             item.StartDate <= today && today <= item.EndDate &&
@@ -119,7 +158,9 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         if (isDayOff)
         {
             if (_activeBreakId.HasValue)
-                await CleanupBreakAsync(db, queueService, spotify, _activeBreakId.Value, cancellationToken);
+                await CleanupBreakAsync(db, queueService,
+                    scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>(),
+                    _activeBreakId.Value, cancellationToken);
             await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
             return;
         }
@@ -128,7 +169,9 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             item.BreakDate == today && item.StartAt <= now && now < item.EndsAt, cancellationToken);
 
         if (_activeBreakId.HasValue && (activeBreak == null || activeBreak.Id != _activeBreakId))
-            await CleanupBreakAsync(db, queueService, spotify, _activeBreakId.Value, cancellationToken);
+            await CleanupBreakAsync(db, queueService,
+                scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>(),
+                _activeBreakId.Value, cancellationToken);
 
         if (activeBreak == null)
         {
@@ -140,7 +183,9 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         if (!musicEnabled)
         {
             if (_activeBreakId.HasValue)
-                await CleanupBreakAsync(db, queueService, spotify, _activeBreakId.Value, cancellationToken);
+                await CleanupBreakAsync(db, queueService,
+                    scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>(),
+                    _activeBreakId.Value, cancellationToken);
             await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
             return;
         }
@@ -155,6 +200,42 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 .Include(item => item.Song).ThenInclude(song => song.Artist)
                 .Include(item => item.Votes)
                 .ToListAsync(cancellationToken);
+            if (approvedQueue.Count == 0)
+            {
+                var defaults = await db.DefaultSongs
+                    .Include(item => item.Song).ThenInclude(song => song.Artist)
+                    .Where(item => item.Song.IsActive)
+                    .OrderBy(item => item.Id)
+                    .ToListAsync(cancellationToken);
+                var existingSongIds = await db.QueueItems
+                    .Where(item => item.BreakId == activeBreak.Id)
+                    .Select(item => item.SongId)
+                    .ToListAsync(cancellationToken);
+                var nextOrder = await db.QueueItems
+                    .Where(item => item.BreakId == activeBreak.Id)
+                    .MaxAsync(item => (int?)item.OrderIndex, cancellationToken) + 1 ?? 1;
+                foreach (var defaultSong in defaults.Where(item => !existingSongIds.Contains(item.SongId)))
+                {
+                    db.QueueItems.Add(new QueueItem
+                    {
+                        BreakId = activeBreak.Id,
+                        SongId = defaultSong.SongId,
+                        Song = defaultSong.Song,
+                        ModerationStatus = "approved",
+                        Status = "queued",
+                        OrderIndex = nextOrder++,
+                        CreatedAt = now
+                    });
+                }
+                await db.SaveChangesAsync(cancellationToken);
+                approvedQueue = await db.QueueItems
+                    .Where(item => item.BreakId == activeBreak.Id &&
+                        (item.ModerationStatus == "approved" || item.ModerationStatus == null) &&
+                        item.Status != "played" && item.Status != "skipped")
+                    .Include(item => item.Song).ThenInclude(song => song.Artist)
+                    .Include(item => item.Votes)
+                    .ToListAsync(cancellationToken);
+            }
             var plan = breakService.CalculateBreak(activeBreak.Id, remainingSeconds, approvedQueue);
             var queueById = approvedQueue.ToDictionary(item => item.Id);
             var tracks = new List<SpotifyQueueTrack>();
@@ -186,6 +267,21 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 _queueSubmitted = false;
             }
             await queueService.BroadcastQueueAsync(activeBreak.Id);
+            if (tracks.Count == 0)
+            {
+                await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+                return;
+            }
+        }
+
+        var spotify = scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>();
+        if (_pausePending)
+            await RetryPauseAsync(spotify, cancellationToken);
+
+        if (_spotifyTracks.Count == 0)
+        {
+            await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            return;
         }
 
         await SubmitQueueIfNeededAsync(db, queueService, spotify, cancellationToken);
@@ -348,6 +444,24 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
         {
             _logger.LogWarning(ex, "Spotify pause is pending and will be retried.");
+        }
+    }
+
+    private static async Task PauseSpotifyForLocalPlaybackAsync(
+        IServiceProvider services,
+        CancellationToken cancellationToken)
+    {
+        var spotify = services.GetService<ISpotifyConnectPlaybackService>();
+        if (spotify == null)
+            return;
+
+        try
+        {
+            await spotify.PauseAsync(cancellationToken);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+            ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
         }
     }
 

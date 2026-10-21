@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LibVLCSharp.Shared;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Extensions;
+using static System.Net.WebRequestMethods;
 using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers;
@@ -48,7 +50,8 @@ public record GenresListResponseDto(
 );
 
 /// <summary>
-/// Kontroler API obsługujący katalog utworów, ulubione i planowanie kolejki przerw
+/// Kontroler API obsługujący operacje związane z utworami: pobieranie i zarządzanie ulubionymi, odtwarzanie plików/URL
+/// oraz obliczanie planu przerwy dla kolejki utworów
 /// </summary>
 [Route("api/[controller]")]
 [ApiController]
@@ -57,15 +60,18 @@ public class TracksController : ControllerBase
 {
     private readonly schoolmusicContext _context;
     private readonly IBreakService _breakService;
+    private readonly IAudioPlayerService _audioPlayerService;
     private readonly ISongSourceService _songSourceService;
 
     public TracksController(
         schoolmusicContext context,
         IBreakService breakService,
+        IAudioPlayerService audioPlayerService,
         ISongSourceService songSourceService)
     {
         _context = context;
         _breakService = breakService;
+        _audioPlayerService = audioPlayerService;
         _songSourceService = songSourceService;
     }
 

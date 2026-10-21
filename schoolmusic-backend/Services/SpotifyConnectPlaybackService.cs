@@ -9,17 +9,6 @@ using schoolmusic_backend.Models;
 
 namespace schoolmusic_backend.Services;
 
-public sealed record PlayerStatusDto(
-    bool IsPlaying,
-    bool IsPaused,
-    int Volume,
-    bool IsMuted,
-    string Source,
-    string? Title,
-    string? Artist,
-    long CurrentPositionMs,
-    long TotalDurationMs);
-
 public sealed record SpotifyQueueTrack(int QueueItemId, string SpotifyId, string Title, string Artist);
 
 public sealed record SpotifyPlaybackSnapshot(
