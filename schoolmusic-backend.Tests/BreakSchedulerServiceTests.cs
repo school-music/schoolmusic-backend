@@ -3,7 +3,9 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.AspNetCore.Mvc;
 using Moq;
+using schoolmusic_backend.Controllers;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
@@ -19,6 +21,7 @@ public sealed class BreakSchedulerServiceTests
         public Mock<IBreakService> BreakService { get; } = new();
         public Mock<IQueueService> QueueService { get; } = new();
         public Mock<ISpotifyConnectPlaybackService> Spotify { get; } = new();
+        public Mock<IAudioPlayerService> AudioPlayer { get; } = new();
 
         public Fixture()
         {
@@ -28,6 +31,7 @@ public sealed class BreakSchedulerServiceTests
             services.AddScoped(_ => BreakService.Object);
             services.AddScoped(_ => QueueService.Object);
             services.AddScoped(_ => Spotify.Object);
+            services.AddScoped(_ => AudioPlayer.Object);
             var statusService = new Mock<ISystemStatusService>();
             statusService.Setup(service => service.GetStatusAsync(It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new SystemStatusDto(
@@ -55,13 +59,18 @@ public sealed class BreakSchedulerServiceTests
                 .ReturnsAsync(playback);
             Spotify.Setup(service => service.PauseAsync(It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
+            Spotify.Setup(service => service.ResumeAsync(It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             Spotify.Setup(service => service.SkipToNextAsync(It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
+            AudioPlayer.Setup(service => service.GetStatus())
+                .Returns(new PlayerStatusDto(false, false, 50, false, "None", null, null, 0, 0));
             QueueService.Setup(service => service.ArchiveBreakAsync(It.IsAny<int>()))
                 .ReturnsAsync(ServiceResult<object>.Ok(new object()));
 
             Service = new BreakSchedulerService(
                 Provider.GetRequiredService<IServiceScopeFactory>(),
+                AudioPlayer.Object,
                 hubContext.Object,
                 NullLogger<BreakSchedulerService>.Instance);
         }
@@ -302,6 +311,46 @@ public sealed class BreakSchedulerServiceTests
         Assert.Null(playback.CurrentQueueItemId);
         Assert.Null(playback.StartedAt);
         Assert.False(playback.IsPaused);
+    }
+
+    [Fact]
+    public async Task Tick_PausesSpotifyDuringLocalPlaybackAndResumesWhenItEnds()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak();
+        await fixture.Tick();
+        fixture.AudioPlayer.Setup(service => service.GetStatus())
+            .Returns(new PlayerStatusDto(true, false, 50, false, "LocalAudio", "Assembly", null, 0, 1000));
+
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.PauseAsync(It.IsAny<CancellationToken>()), Times.Once);
+        fixture.AudioPlayer.Setup(service => service.GetStatus())
+            .Returns(new PlayerStatusDto(false, false, 50, false, "None", null, null, 0, 0));
+
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.ResumeAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task AdminManualFilePlaybackPausesSpotifyBeforeStartingVlc()
+    {
+        var spotify = new Mock<ISpotifyConnectPlaybackService>();
+        var player = new Mock<IAudioPlayerService>();
+        spotify.Setup(service => service.PauseAsync(It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        player.Setup(service => service.PlayFileOrUrlAsync("/recordings/assembly.mp4", "Assembly", "School"))
+            .ReturnsAsync(ServiceResult<PlayerStatusDto>.Ok(
+                new PlayerStatusDto(true, false, 50, false, "LocalAudio", "Assembly", "School", 0, 1000)));
+        var controller = new PlayerController(spotify.Object, player.Object, Mock.Of<IBreakSchedulerService>());
+
+        var result = await controller.PlayFile(
+            new PlayFileDto("/recordings/assembly.mp4", "Assembly", "School"), CancellationToken.None);
+
+        Assert.Equal(200, Assert.IsType<ObjectResult>(result).StatusCode);
+        spotify.Verify(service => service.PauseAsync(It.IsAny<CancellationToken>()), Times.Once);
+        player.Verify(service => service.PlayFileOrUrlAsync(
+            "/recordings/assembly.mp4", "Assembly", "School"), Times.Once);
     }
 
     [Fact]

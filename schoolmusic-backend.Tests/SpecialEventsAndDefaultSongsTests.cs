@@ -287,10 +287,17 @@ public class SpecialEventsAndDefaultSongsTests
         mockPlayer
             .Setup(p => p.PlayFileOrUrlAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
             .ReturnsAsync(ServiceResult<PlayerStatusDto>.Ok(dummyStatus));
+        mockPlayer.SetupSequence(p => p.GetStatus())
+            .Returns(new PlayerStatusDto(true, false, 50, false, "Url", "Announcement", null, 0, 1000))
+            .Returns(new PlayerStatusDto(false, false, 50, false, "None", null, null, 0, 0));
+        var mockSpotify = new Mock<ISpotifyConnectPlaybackService>();
+        mockSpotify.Setup(s => s.PauseAsync(It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        mockSpotify.Setup(s => s.ResumeAsync(It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
         var services = new ServiceCollection();
         services.AddScoped(_ => CreateInMemoryContext(dbName));
         services.AddScoped<IBreakService, BreakService>();
+        services.AddScoped(_ => mockSpotify.Object);
         services.AddScoped(_ => new Mock<IQueueService>().Object);
         services.AddScoped(_ => CreateMockStatusService());
         var serviceProvider = services.BuildServiceProvider();
@@ -306,6 +313,7 @@ public class SpecialEventsAndDefaultSongsTests
 
         // Act: wywołanie ProcessTickAsync
         await scheduler.ProcessTickAsync();
+        await scheduler.ProcessTickAsync();
 
         // Assert
         using var verificationDb = CreateInMemoryContext(dbName);
@@ -313,6 +321,8 @@ public class SpecialEventsAndDefaultSongsTests
         Assert.NotNull(updatedEvent);
         Assert.Equal("done", updatedEvent.EventStatus);
         mockPlayer.Verify(p => p.PlayFileOrUrlAsync("https://audio.schoolmusic.local/bell.mp3", It.IsAny<string>(), It.IsAny<string>()), Times.Once);
+        mockSpotify.Verify(s => s.PauseAsync(It.IsAny<CancellationToken>()), Times.Once);
+        mockSpotify.Verify(s => s.ResumeAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

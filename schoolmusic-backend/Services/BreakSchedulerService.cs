@@ -28,6 +28,9 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     private int _lastPlayingTrackIndex = -1;
     private bool _queueSubmitted;
     private bool _pausePending;
+    private bool _localPlaybackActive;
+    private bool _resumePending;
+    private int? _activeSpecialEventId;
 
     public BreakSchedulerService(
         IServiceScopeFactory scopeFactory,
@@ -137,19 +140,74 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 "School announcement");
             if (result.Success)
             {
-                pendingEvent.EventStatus = "done";
+                _activeSpecialEventId = pendingEvent.Id;
+            }
+            else
+            {
+                pendingEvent.EventStatus = "pending";
                 await db.SaveChangesAsync(cancellationToken);
             }
-            await PauseSpotifyForLocalPlaybackAsync(scope.ServiceProvider, cancellationToken);
-            await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
-            return;
         }
 
         var localPlayer = _audioPlayer ?? scope.ServiceProvider.GetService<IAudioPlayerService>();
         if (localPlayer?.GetStatus().Source is not null and not "None")
         {
-            await PauseSpotifyForLocalPlaybackAsync(scope.ServiceProvider, cancellationToken);
+            if (!_localPlaybackActive || _pausePending)
+                await PauseSpotifyForLocalPlaybackAsync(scope.ServiceProvider, cancellationToken);
+            _localPlaybackActive = true;
+            await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
             return;
+        }
+
+        var localPlaybackJustEnded = _localPlaybackActive;
+        if (localPlaybackJustEnded)
+        {
+            _localPlaybackActive = false;
+            _pausePending = false;
+            if (_activeSpecialEventId is int eventId)
+            {
+                var completedEvent = await db.SpecialEvents.FindAsync([eventId], cancellationToken);
+                if (completedEvent != null)
+                {
+                    completedEvent.EventStatus = "done";
+                    await db.SaveChangesAsync(cancellationToken);
+                }
+                _activeSpecialEventId = null;
+            }
+
+            var spotifyService = scope.ServiceProvider.GetService<ISpotifyConnectPlaybackService>();
+            if (spotifyService != null)
+            {
+                try
+                {
+                    await spotifyService.ResumeAsync(cancellationToken);
+                    _resumePending = false;
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+                    ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
+                {
+                    _logger.LogWarning(ex, "Could not resume Spotify after local playback; resume will be retried.");
+                    _resumePending = true;
+                }
+            }
+        }
+
+        if (_resumePending && !_localPlaybackActive && !localPlaybackJustEnded)
+        {
+            var spotifyService = scope.ServiceProvider.GetService<ISpotifyConnectPlaybackService>();
+            if (spotifyService != null)
+            {
+                try
+                {
+                    await spotifyService.ResumeAsync(cancellationToken);
+                    _resumePending = false;
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+                    ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
+                {
+                    _logger.LogWarning(ex, "Spotify resume remains pending after local playback.");
+                }
+            }
         }
 
         var isDayOff = await db.ExceptionDays.AnyAsync(item =>
@@ -447,7 +505,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         }
     }
 
-    private static async Task PauseSpotifyForLocalPlaybackAsync(
+    private async Task PauseSpotifyForLocalPlaybackAsync(
         IServiceProvider services,
         CancellationToken cancellationToken)
     {
@@ -458,10 +516,12 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         try
         {
             await spotify.PauseAsync(cancellationToken);
+            _pausePending = false;
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
             ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
         {
+            _pausePending = true;
         }
     }
 
