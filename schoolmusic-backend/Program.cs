@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi;
 using Scalar.AspNetCore;
 using schoolmusic_backend.Models;
 using System.Text;
@@ -7,17 +8,22 @@ using StackExchange.Redis;
 using LibVLCSharp.Shared;
 using schoolmusic_backend.Services;
 
-/// TODO: commets to every controller, to make code more readable,
-/// since the first controllers (UserController, TracksController) are simple but the more advanced
-/// ones will be a lot more complex
 
 LibVLCSharp.Shared.Core.Initialize();
 
 var builder = WebApplication.CreateBuilder(args);
-var connectionString = builder.Configuration.GetConnectionString("database");
-var redisConnectionString = builder.Configuration.GetConnectionString("redis");
+var connectionString = builder.Configuration.GetConnectionString("database")
+    ?? builder.Configuration.GetSection("ConnectionString")["database"];
+var redisConnectionString = builder.Configuration.GetConnectionString("redis")
+    ?? builder.Configuration.GetSection("ConnectionString")["redis"]
+    ?? "localhost:6379";
+
+if (string.IsNullOrWhiteSpace(redisConnectionString) || redisConnectionString == "REDIS_CONNECTION_STRING_HERE")
+{
+    redisConnectionString = "localhost:6379";
+}
 var jwtSettings = builder.Configuration.GetSection("Jwt");
-var key = Encoding.UTF8.GetBytes(jwtSettings["Key"]);
+var key = Encoding.UTF8.GetBytes(jwtSettings["Key"] ?? "default_jwt_secret_key_development_only");
 
 builder.Services.AddAuthentication(options=>
 {
@@ -42,7 +48,54 @@ builder.Services.AddAuthentication(options=>
 builder.Services.AddControllers();
 builder.Services.AddHttpClient("Spotify", client => client.Timeout = TimeSpan.FromSeconds(10));
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+var securityScheme = new OpenApiSecurityScheme
+{
+    Name = "Authorization",
+    Description = "Podaj token JWT w formacie: Bearer {twoj_token}",
+    In = ParameterLocation.Header,
+    Type = SecuritySchemeType.Http,
+    Scheme = "bearer",
+    BearerFormat = "JWT"
+};
+
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer((document, context, cancellationToken) =>
+    {
+        document.Info = new OpenApiInfo
+        {
+            Title = "SchoolMusic Backend API",
+            Version = "v1",
+            Description = "Inteligentny radiowęzeł szkolny - backend REST API z automatycznym harmonogramem przerw, kolejką utworów, panelem moderacji i integracją audio."
+        };
+
+        document.Components ??= new OpenApiComponents();
+        document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
+        document.Components.SecuritySchemes["Bearer"] = securityScheme;
+
+        return Task.CompletedTask;
+    });
+
+    options.AddOperationTransformer((operation, context, cancellationToken) =>
+    {
+        var hasAuthorize = context.Description.ActionDescriptor.EndpointMetadata
+            .Any(m => m is Microsoft.AspNetCore.Authorization.IAuthorizeData);
+
+        var allowAnonymous = context.Description.ActionDescriptor.EndpointMetadata
+            .Any(m => m is Microsoft.AspNetCore.Authorization.IAllowAnonymous);
+
+        if (hasAuthorize && !allowAnonymous)
+        {
+            operation.Security ??= new List<OpenApiSecurityRequirement>();
+            operation.Security.Add(new OpenApiSecurityRequirement
+            {
+                [new OpenApiSecuritySchemeReference("Bearer")] = new List<string>()
+            });
+        }
+
+        return Task.CompletedTask;
+    });
+});
 
 // Database and Redis config
 builder.Services.AddDbContext<schoolmusicContext>(options=>
@@ -50,7 +103,11 @@ builder.Services.AddDbContext<schoolmusicContext>(options=>
 );
 
 builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
-    ConnectionMultiplexer.Connect(redisConnectionString)
+{
+    var config = ConfigurationOptions.Parse(redisConnectionString);
+    config.AbortOnConnectFail = false;
+    return ConnectionMultiplexer.Connect(config);
+}
 );
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()

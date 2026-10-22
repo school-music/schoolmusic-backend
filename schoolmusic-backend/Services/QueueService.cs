@@ -151,7 +151,7 @@ namespace schoolmusic_backend.Services
         /// cooldown, otwarte głosowanie) i albo automatycznie zatwierdza utwór z greenlisty, albo umieszcza propozycję
         /// w kolejce do weryfikacji moderatorów
         /// </summary>
-        /// <returns>ServiceResult<object> z odpowiednim statusem i danymi: Forbidden gdy użytkownik zablokowany; NotFound gdy
+        /// <returns>ServiceResult&lt;object&gt; z odpowiednim statusem i danymi: Forbidden gdy użytkownik zablokowany; NotFound gdy
         /// utwór lub przerwa nie istnieje; BadRequest dla nieprawidłowych warunków (czarna lista, cooldown, zamknięte
         /// głosowanie, brak przerw); Conflict gdy propozycja już istnieje; Created gdy utwór z greenlisty został
         /// zatwierdzony; Accepted gdy propozycja przesłana do moderacji</returns>

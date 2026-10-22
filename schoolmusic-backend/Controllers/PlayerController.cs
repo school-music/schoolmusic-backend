@@ -7,6 +7,9 @@ namespace schoolmusic_backend.Controllers;
 public sealed record SetVolumeDto(int Volume);
 public sealed record PlayFileDto(string PathOrUrl, string? Title, string? Artist);
 
+/// <summary>
+/// Kontroler sterowania odtwarzaczem radiowęzła szkolnego (Spotify Connect oraz lokalny silnik LibVLC).
+/// </summary>
 [ApiController]
 [Route("api/player")]
 [Authorize]
@@ -15,6 +18,9 @@ public sealed class PlayerController(
     IAudioPlayerService audioPlayer,
     IBreakSchedulerService scheduler) : ControllerBase
 {
+    /// <summary>
+    /// Pobiera aktualny stan odtwarzacza (tytuł, wykonawca, postęp, głośność, status odtwarzania).
+    /// </summary>
     [HttpGet("status")]
     [AllowAnonymous]
     public async Task<IActionResult> GetStatus(CancellationToken cancellationToken)
@@ -33,6 +39,9 @@ public sealed class PlayerController(
         }
     }
 
+    /// <summary>
+    /// Ustawia poziom głośności odtwarzacza (0-100%).
+    /// </summary>
     [HttpPost("volume")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public async Task<IActionResult> SetVolume([FromBody] SetVolumeDto dto, CancellationToken cancellationToken)
@@ -54,16 +63,25 @@ public sealed class PlayerController(
         }
     }
 
+    /// <summary>
+    /// Zwiększa głośność odtwarzacza o określoną liczbę procent (domyślnie 5%).
+    /// </summary>
     [HttpPost("volume/up")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public Task<IActionResult> VolumeUp([FromQuery] int step = 5, CancellationToken cancellationToken = default) =>
         AdjustVolumeAsync(Math.Clamp(step, 0, 100), cancellationToken);
 
+    /// <summary>
+    /// Zmniejsza głośność odtwarzacza o określoną liczbę procent (domyślnie 5%).
+    /// </summary>
     [HttpPost("volume/down")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public Task<IActionResult> VolumeDown([FromQuery] int step = 5, CancellationToken cancellationToken = default) =>
         AdjustVolumeAsync(-Math.Clamp(step, 0, 100), cancellationToken);
 
+    /// <summary>
+    /// Przesyła plik audio (MP3, WAV, OGG, FLAC) i natychmiast odtwarza go na radiowęźle.
+    /// </summary>
     [HttpPost("upload-and-play")]
     [RequestSizeLimit(100_000_000)]
     [Authorize(Roles = "mod,admin,head_admin")]
@@ -100,6 +118,9 @@ public sealed class PlayerController(
             artist ?? "Unknown artist"));
     }
 
+    /// <summary>
+    /// Wstrzymuje aktualne odtwarzanie muzyki.
+    /// </summary>
     [HttpPost("pause")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public Task<IActionResult> Pause(CancellationToken cancellationToken) =>
@@ -107,6 +128,9 @@ public sealed class PlayerController(
             ? AudioCommandAsync(audioPlayer.PauseAsync())
             : PlaybackCommandAsync(spotify.PauseAsync(cancellationToken), cancellationToken);
 
+    /// <summary>
+    /// Wznawia wstrzymane odtwarzanie muzyki.
+    /// </summary>
     [HttpPost("resume")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public Task<IActionResult> Resume(CancellationToken cancellationToken) =>
@@ -114,6 +138,9 @@ public sealed class PlayerController(
             ? AudioCommandAsync(audioPlayer.ResumeAsync())
             : PlaybackCommandAsync(spotify.ResumeAsync(cancellationToken), cancellationToken);
 
+    /// <summary>
+    /// Odtwarza wskazany plik lokalny lub strumień z adresu URL.
+    /// </summary>
     [HttpPost("play-file")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public async Task<IActionResult> PlayFile([FromBody] PlayFileDto dto, CancellationToken cancellationToken)
@@ -130,6 +157,9 @@ public sealed class PlayerController(
         return FromAudioResult(await audioPlayer.PlayFileOrUrlAsync(dto.PathOrUrl, dto.Title, dto.Artist));
     }
 
+    /// <summary>
+    /// Całkowicie zatrzymuje odtwarzanie dźwięku i resetuje stan.
+    /// </summary>
     [HttpPost("stop")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public async Task<IActionResult> Stop(CancellationToken cancellationToken)
@@ -147,6 +177,9 @@ public sealed class PlayerController(
         return FromAudioResult(result);
     }
 
+    /// <summary>
+    /// Przełącza stan wyciszenia odtwarzacza (Mute/Unmute).
+    /// </summary>
     [HttpPost("mute")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public IActionResult ToggleMute()
@@ -155,6 +188,9 @@ public sealed class PlayerController(
         return Ok(audioPlayer.GetStatus());
     }
 
+    /// <summary>
+    /// Pomija bieżący utwór w kolejce radiowęzła i przechodzi do kolejnego.
+    /// </summary>
     [HttpPost("skip")]
     [Authorize(Roles = "mod,admin,head_admin")]
     public async Task<IActionResult> Skip(CancellationToken cancellationToken)

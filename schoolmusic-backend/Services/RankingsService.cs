@@ -52,7 +52,7 @@ namespace schoolmusic_backend.Services
 
         /// <summary>
         ///Zwraca datę początkową odpowiadającą zadanej przerwie lub null dla całkowitego zakresu.
-        /// </summary
+        /// </summary>
         /// <returns>Data początkowa w UTC odpowiadająca przerwie lub null dla 'all-time'/'all'.</returns>
         private static DateTime? GetStartDateForPeriod(string? period)
         {

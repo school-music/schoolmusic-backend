@@ -5,15 +5,32 @@ using schoolmusic_backend.Models;
 
 namespace schoolmusic_backend.Controllers;
 
+/// <summary>
+/// Model DTO reprezentujący szablon przerwy szkolnej.
+/// </summary>
 public record BreakTemplateDto(int Id, int BreakNumber, TimeOnly StartsTime, TimeOnly EndsTime);
+
+/// <summary>
+/// Model żądania utworzenia nowego szablonu przerwy szkolnej.
+/// </summary>
 public record CreateBreakTemplateDto(int BreakNumber, TimeOnly StartsTime, TimeOnly EndsTime);
+
+/// <summary>
+/// Model żądania aktualizacji istniejącego szablonu przerwy szkolnej.
+/// </summary>
 public record UpdateBreakTemplateDto(int BreakNumber, TimeOnly StartsTime, TimeOnly EndsTime);
 
+/// <summary>
+/// Kontroler panelu administracyjnego do zarządzania stałymi szablonami przerw szkolnych (harmonogram dzwonków).
+/// </summary>
 [Route("api/breaks/templates")]
 [ApiController]
 [Authorize(Roles = "admin,head_admin")]
 public class BreakTemplatesController(schoolmusicContext context) : ControllerBase
 {
+    /// <summary>
+    /// Pobiera listę wszystkich szablonów przerw posortowanych według numeru przerwy.
+    /// </summary>
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<BreakTemplateDto>>> GetBreakTemplates()
     {
@@ -29,6 +46,10 @@ public class BreakTemplatesController(schoolmusicContext context) : ControllerBa
         return Ok(templates);
     }
 
+    /// <summary>
+    /// Tworzy nowy szablon przerwy szkolnej.
+    /// </summary>
+    /// <param name="dto">Dane nowego szablonu przerwy.</param>
     [HttpPost]
     public async Task<IActionResult> CreateBreakTemplate(CreateBreakTemplateDto dto)
     {
@@ -55,6 +76,11 @@ public class BreakTemplatesController(schoolmusicContext context) : ControllerBa
         return Created("/api/breaks/templates", ToDto(template));
     }
 
+    /// <summary>
+    /// Aktualizuje godziny lub numer istniejącego szablonu przerwy.
+    /// </summary>
+    /// <param name="id">Identyfikator szablonu przerwy.</param>
+    /// <param name="dto">Zaktualizowane dane szablonu przerwy.</param>
     [HttpPut("{id:int}")]
     public async Task<IActionResult> UpdateBreakTemplate(int id, UpdateBreakTemplateDto dto)
     {
@@ -98,6 +124,7 @@ public class BreakTemplatesController(schoolmusicContext context) : ControllerBa
             await context.SaveChangesAsync();
             context.BreakTemplates.Add(updatedTemplate);
             await context.SaveChangesAsync();
+
             if (transaction != null)
             {
                 await transaction.CommitAsync();
@@ -113,6 +140,10 @@ public class BreakTemplatesController(schoolmusicContext context) : ControllerBa
         return Ok(ToDto(template));
     }
 
+    /// <summary>
+    /// Usuwa szablon przerwy szkolnej.
+    /// </summary>
+    /// <param name="id">Identyfikator usuwanego szablonu przerwy.</param>
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> DeleteBreakTemplate(int id)
     {

@@ -370,7 +370,7 @@ public class TracksController : ControllerBase
     /// <summary>
     /// Zwraca listę ulubionych utworów zalogowanego użytkownika
     /// </summary>
-    /// <returns>Task<IActionResult> — 200 OK zawierające obiekt z polem Message i kolekcją Tracks (Id, SpotifyId, Title, Cover,
+    /// <returns>Task&lt;IActionResult&gt; — 200 OK zawierające obiekt z polem Message i kolekcją Tracks (Id, SpotifyId, Title, Cover,
     /// DurationMs); 401 Unauthorized gdy token JWT jest nieprawidłowy</returns>
     [HttpGet("favourites")]
     public async Task<IActionResult> GetAllFavourites()

@@ -109,7 +109,7 @@ public partial class schoolmusicContext : DbContext
         {
             entity.HasKey(e => e.Id).HasName("PRIMARY");
 
-            entity.Property(e => e.MusicEnabled).HasDefaultValueSql("'1'");
+            entity.Property(e => e.MusicEnabled).HasDefaultValue(true);
         });
 
         modelBuilder.Entity<BreakTemplate>(entity =>
@@ -216,7 +216,7 @@ public partial class schoolmusicContext : DbContext
             entity.HasKey(e => e.Id).HasName("PRIMARY");
 
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("current_timestamp()");
-            entity.Property(e => e.IsActive).HasDefaultValueSql("'1'");
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.Source).HasDefaultValueSql("'spotify'");
 
             entity.HasOne(d => d.Artist).WithMany(p => p.Songs)
@@ -350,7 +350,7 @@ public partial class schoolmusicContext : DbContext
 
             entity.Property(e => e.Weekday).HasColumnType("tinyint(4)");
 
-            entity.Property(e => e.MusicEnabled).HasDefaultValueSql("'1'");
+            entity.Property(e => e.MusicEnabled).HasDefaultValue(true);
         });
 
         OnModelCreatingPartial(modelBuilder);
