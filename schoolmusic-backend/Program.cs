@@ -141,6 +141,7 @@ builder.Services.AddSingleton<ISongSourceService, SpotifySongSource>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ISystemStatusService, SystemStatusService>();
 builder.Services.AddScoped<IStatisticsService, StatisticsService>();
+builder.Services.AddSingleton<ILdapService, LdapService>();
 
 var app = builder.Build();
 
