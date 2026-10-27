@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
 using Scalar.AspNetCore;
@@ -111,7 +111,11 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
 );
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
-    ?? ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"];
+    ?? [
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:8080", "http://127.0.0.1:8080"
+    ];
 
 builder.Services.AddCors(options =>
 {
@@ -141,8 +145,16 @@ builder.Services.AddSingleton<ISongSourceService, SpotifySongSource>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ISystemStatusService, SystemStatusService>();
 builder.Services.AddScoped<IStatisticsService, StatisticsService>();
+builder.Services.AddSingleton<ILdapService, LdapService>();
 
 var app = builder.Build();
+
+// Walidacja konfiguracji LDAP przy starcie aplikacji
+var ldapService = app.Services.GetRequiredService<ILdapService>();
+if (ldapService is LdapService ldapServiceImpl)
+{
+    ldapServiceImpl.ValidateConfiguration();
+}
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("Features:SwaggerEnabled"))
@@ -153,7 +165,12 @@ if (app.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("Fea
 
 app.UseCors("CorsPolicy");
 
-app.UseHttpsRedirection();
+// W srodowisku Development wylaczamy HttpsRedirection, aby nie psuc lokalnego HTTP (5170/5200),
+// kontenerow Dockera (8080) oraz negocjacji SignalR z przegladarki.
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 
 app.UseAuthentication();
 

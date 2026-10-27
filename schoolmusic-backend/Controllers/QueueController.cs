@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Extensions;
@@ -47,14 +47,25 @@ namespace schoolmusic_backend.Controllers
         }
 
         /// <summary>
-        /// Pobiera listę utworów zgłoszonych na daną przerwę (Live ranking)
+        /// Pobiera listę utworów zgłoszonych na daną przerwę (Live ranking).
+        /// Obsługuje zarówno /api/queue/break/{breakId}, jak i /api/queue?breakId={breakId}.
         /// </summary>
+        [HttpGet]
         [HttpGet("break/{breakId:int}")]
         [AllowAnonymous]
-        public async Task<IActionResult> GetQueueForBreak(int breakId)
+        public async Task<IActionResult> GetQueueForBreak(
+            [FromRoute] int? breakId = null,
+            [FromQuery(Name = "breakId")] int? queryBreakId = null)
         {
+            var effectiveBreakId = breakId ?? queryBreakId;
+            if (!effectiveBreakId.HasValue)
+            {
+                var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
+                effectiveBreakId = allBreaks.FirstOrDefault()?.Id ?? 1;
+            }
+
             int? currentUserId = HttpContext.GetCurrentUserId();
-            var result = await _queueService.GetQueueForBreakAsync(breakId, currentUserId);
+            var result = await _queueService.GetQueueForBreakAsync(effectiveBreakId.Value, currentUserId);
             return FromResult(result);
         }
 
@@ -102,8 +113,10 @@ namespace schoolmusic_backend.Controllers
         }
 
         /// <summary>
-        /// Zgłasza piosenkę przez zalogowanego ucznia na najbliższą (lub wybraną) przerwę
+        /// Zgłasza piosenkę przez zalogowanego ucznia na najbliższą (lub wybraną) przerwę.
+        /// Obsługuje zarówno /api/queue/propose, jak i bezpośrednie /api/queue.
         /// </summary>
+        [HttpPost]
         [HttpPost("propose")]
         public async Task<IActionResult> ProposeSong([FromBody] ProposeSongDto dto)
         {

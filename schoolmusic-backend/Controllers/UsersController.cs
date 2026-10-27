@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using schoolmusic_backend.Models;
@@ -6,12 +6,13 @@ using System.Security.Claims;
 using System.Text;
 using System.IdentityModel.Tokens.Jwt;
 using Microsoft.AspNetCore.Authorization;
-using StackExchange.Redis;
+using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers;
 
 /// <summary>
-/// Kontroler uwierzytelniania i rejestracji użytkowników (JWT).
+/// Kontroler API odpowiedzialny za uwierzytelnianie użytkowników (logowanie lokalne oraz przez szkolne konto LDAP),
+/// rejestrację uczniów oraz zarządzanie własnym kontem.
 /// </summary>
 [Route("api/auth")]
 [ApiController]
@@ -20,11 +21,16 @@ public class UsersController : ControllerBase
 {
     private readonly schoolmusicContext _context;
     private readonly IConfiguration _configuration;
+    private readonly ILdapService _ldapService;
 
-    public UsersController(schoolmusicContext context, IConfiguration configuration)
+    public UsersController(
+        schoolmusicContext context,
+        IConfiguration configuration,
+        ILdapService ldapService)
     {
         _context = context;
         _configuration = configuration;
+        _ldapService = ldapService;
     }
 
     /// <summary>
@@ -32,9 +38,20 @@ public class UsersController : ControllerBase
     /// </summary>
     public class UserLoginDto
     {
-        /// <summary>Nazwa użytkownika (login).</summary>
+        /// <summary>Nazwa użytkownika (login lokalny lub szkolny imie.nazwisko).</summary>
         public string name { get; set; } = string.Empty;
         /// <summary>Hasło użytkownika.</summary>
+        public string password { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Model danych logowania dedykowanego dla kont szkolnych LDAP.
+    /// </summary>
+    public class SchoolLoginDto
+    {
+        /// <summary>Login szkolny (np. imie.nazwisko lub email szkolny).</summary>
+        public string login { get; set; } = string.Empty;
+        /// <summary>Hasło do szkolnego konta.</summary>
         public string password { get; set; } = string.Empty;
     }
 
@@ -50,7 +67,20 @@ public class UsersController : ControllerBase
     }
 
     /// <summary>
+    /// Odpowiedź zwracana po pomyślnym zalogowaniu użytkownika.
+    /// </summary>
+    public record LoginResponseDto(
+        string Message,
+        string jwtSecurityToken,
+        string role,
+        int userId,
+        string username,
+        bool isLdap
+    );
+
+    /// <summary>
     /// Loguje użytkownika do systemu i zwraca token JWT z przypisaną rolą.
+    /// Wspiera logowanie lokalne oraz automatyczny fallback do szkolnego katalogu LDAP.
     /// </summary>
     /// <param name="userLoginDto">Dane logowania (login i hasło).</param>
     /// <returns>Token JWT i status operacji.</returns>
@@ -58,55 +88,164 @@ public class UsersController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> Login([FromBody] UserLoginDto userLoginDto)
     {
-        var exisitingUser = await _context.Users.Include(u => u.Rank)
-            .FirstOrDefaultAsync(u => u.UserLogin == userLoginDto.name);
-        
-        if (exisitingUser == null)
+        if (string.IsNullOrWhiteSpace(userLoginDto.name) || string.IsNullOrWhiteSpace(userLoginDto.password))
         {
-            return Problem(
-                detail: "Błędne hasło i/lub login",
-                statusCode: StatusCodes.Status401Unauthorized,
-                title: "Unauthorized"
-            );
+            return BadRequest(new { Message = "Login i hasło są wymagane." });
         }
 
-        if (!BCrypt.Net.BCrypt.Verify(userLoginDto.password, exisitingUser.UserPassword))
+        var normalizedName = userLoginDto.name.Trim();
+        var existingUser = await _context.Users.Include(u => u.Rank)
+            .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == normalizedName.ToLower());
+
+        // 1. Użytkownik istnieje w bazie lokalnej
+        if (existingUser != null)
         {
-            return BadRequest(new
+            bool isPasswordCorrect = BCrypt.Net.BCrypt.Verify(userLoginDto.password, existingUser.UserPassword);
+
+            // Jeśli hasło lokalne nie pasuje, ale LDAP jest włączony, sprawdzamy w katalogu LDAP
+            if (!isPasswordCorrect && _ldapService.IsEnabled)
             {
-                Message = "Błędne hasło"
+                var ldapFallback = await _ldapService.AuthenticateAsync(normalizedName, userLoginDto.password);
+                if (ldapFallback.Success && ldapFallback.User != null)
+                {
+                    isPasswordCorrect = true;
+                }
+            }
+
+            if (!isPasswordCorrect)
+            {
+                return BadRequest(new { Message = "Błędne hasło" });
+            }
+
+            var isBanned = await _context.BannedUsers.AnyAsync(b => b.UserId == existingUser.Id);
+            if (isBanned)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, new { Message = "Twoje konto zostało zablokowane przez moderatora." });
+            }
+
+            return GenerateLoginResponse(existingUser, "User zalogowany poprawnie", isLdap: false);
+        }
+
+        // 2. Użytkownika nie ma w bazie lokalnej -> Próba logowania przez szkolne konto LDAP (JIT Provisioning)
+        if (_ldapService.IsEnabled)
+        {
+            var ldapResult = await _ldapService.AuthenticateAsync(normalizedName, userLoginDto.password);
+            if (ldapResult.Success && ldapResult.User != null)
+            {
+                var username = ldapResult.User.Username;
+                var newUser = new User
+                {
+                    UserLogin = username,
+                    UserPassword = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N")),
+                    CreatedAt = DateTime.UtcNow,
+                    RankId = 1, // 'user'
+                    PasswordChangedAt = DateTime.UtcNow
+                };
+
+                try
+                {
+                    _context.Users.Add(newUser);
+                    await _context.SaveChangesAsync();
+                    await _context.Entry(newUser).Reference(u => u.Rank).LoadAsync();
+                    return GenerateLoginResponse(newUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                }
+                catch (DbUpdateException)
+                {
+                    _context.Entry(newUser).State = EntityState.Detached;
+                    var parallelUser = await _context.Users.Include(u => u.Rank)
+                        .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
+                    if (parallelUser != null)
+                    {
+                        return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                    }
+                    throw;
+                }
+            }
+        }
+
+        return Problem(
+            detail: "Błędne hasło i/lub login",
+            statusCode: StatusCodes.Status401Unauthorized,
+            title: "Unauthorized"
+        );
+    }
+
+    /// <summary>
+    /// Dedykowany endpoint logowania przez szkolne konto LDAP / Active Directory.
+    /// Jeśli konto nie istnieje w systemie, następuje automatyczna rejestracja (JIT provisioning).
+    /// </summary>
+    /// <param name="dto">Login i hasło konta szkolnego.</param>
+    /// <returns>Token JWT i metadane konta.</returns>
+    [HttpPost("school/login")]
+    [HttpPost("ldap/login")]
+    [AllowAnonymous]
+    public async Task<IActionResult> SchoolLogin([FromBody] SchoolLoginDto dto)
+    {
+        if (string.IsNullOrWhiteSpace(dto.login) || string.IsNullOrWhiteSpace(dto.password))
+        {
+            return BadRequest(new { Message = "Login i hasło konta szkolnego są wymagane." });
+        }
+
+        if (!_ldapService.IsEnabled)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                Message = "Logowanie przez szkolny katalog LDAP jest obecnie wyłączone."
             });
         }
 
-        var jwtSettings = _configuration.GetSection("Jwt");
-        var key = Encoding.UTF8.GetBytes(jwtSettings["Key"] ?? "default_jwt_secret_key_development_only");
-        var credentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256);
-
-        var claims = new[]
+        var ldapResult = await _ldapService.AuthenticateAsync(dto.login, dto.password);
+        if (!ldapResult.Success || ldapResult.User == null)
         {
-            new Claim(JwtRegisteredClaimNames.Sub, exisitingUser.Id.ToString()),
-            new Claim(JwtRegisteredClaimNames.UniqueName, exisitingUser.UserLogin),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-            new Claim(ClaimTypes.Role, exisitingUser.Rank?.Rank1 ?? "user")
+            return Unauthorized(new
+            {
+                Message = ldapResult.ErrorMessage ?? "Niepoprawny login lub hasło konta szkolnego."
+            });
+        }
+
+        var username = ldapResult.User.Username;
+        var existingUser = await _context.Users.Include(u => u.Rank)
+            .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
+
+        if (existingUser != null)
+        {
+            var isBanned = await _context.BannedUsers.AnyAsync(b => b.UserId == existingUser.Id);
+            if (isBanned)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, new { Message = "Twoje konto szkolne zostało zablokowane przez moderatora." });
+            }
+
+            return GenerateLoginResponse(existingUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+        }
+
+        // Auto-provisioning nowego ucznia
+        var newUser = new User
+        {
+            UserLogin = username,
+            UserPassword = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N")),
+            CreatedAt = DateTime.UtcNow,
+            RankId = 1,
+            PasswordChangedAt = DateTime.UtcNow
         };
 
-        var token = new JwtSecurityToken(
-            issuer: jwtSettings["Issuer"],
-            audience: jwtSettings["Audience"],
-            claims: claims,
-            expires: DateTime.UtcNow.AddHours(12),
-            signingCredentials: credentials
-        );
-
-        string tokenString = new JwtSecurityTokenHandler().WriteToken(token);
-
-        return Ok(new
+        try
         {
-            Message = "User zalogowany poprawnie",
-            jwtSecurityToken = tokenString,
-            role = exisitingUser.Rank?.Rank1 ?? "user",
-            userId = exisitingUser.Id
-        });
+            _context.Users.Add(newUser);
+            await _context.SaveChangesAsync();
+            await _context.Entry(newUser).Reference(u => u.Rank).LoadAsync();
+            return GenerateLoginResponse(newUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+        }
+        catch (DbUpdateException)
+        {
+            _context.Entry(newUser).State = EntityState.Detached;
+            var parallelUser = await _context.Users.Include(u => u.Rank)
+                .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
+            if (parallelUser != null)
+            {
+                return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+            }
+            throw;
+        }
     }
 
     /// <summary>
@@ -197,5 +336,40 @@ public class UsersController : ControllerBase
         await _context.SaveChangesAsync();
 
         return NoContent();
+    }
+
+    private IActionResult GenerateLoginResponse(User user, string message, bool isLdap = false)
+    {
+        var jwtSettings = _configuration.GetSection("Jwt");
+        var key = Encoding.UTF8.GetBytes(jwtSettings["Key"] ?? "default_jwt_secret_key_development_only");
+        var credentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256);
+
+        var claims = new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
+            new Claim(JwtRegisteredClaimNames.UniqueName, user.UserLogin),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new Claim(ClaimTypes.Role, user.Rank?.Rank1 ?? "user"),
+            new Claim("auth_method", isLdap ? "ldap" : "password")
+        };
+
+        var token = new JwtSecurityToken(
+            issuer: jwtSettings["Issuer"],
+            audience: jwtSettings["Audience"],
+            claims: claims,
+            expires: DateTime.UtcNow.AddHours(12),
+            signingCredentials: credentials
+        );
+
+        string tokenString = new JwtSecurityTokenHandler().WriteToken(token);
+
+        return Ok(new LoginResponseDto(
+            Message: message,
+            jwtSecurityToken: tokenString,
+            role: user.Rank?.Rank1 ?? "user",
+            userId: user.Id,
+            username: user.UserLogin,
+            isLdap: isLdap
+        ));
     }
 }

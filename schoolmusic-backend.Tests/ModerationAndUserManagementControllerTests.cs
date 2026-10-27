@@ -84,6 +84,42 @@ public class ModerationAndUserManagementControllerTests
         Assert.Single(songs);
         Assert.Equal("proposal-1", songs.Single().Id);
         Assert.Equal("Test song", songs.Single().Title);
+
+        var proposals = (IEnumerable<ModerationController.SongProposalDto>)result.Value!.GetType().GetProperty("Proposals")!.GetValue(result.Value)!;
+        Assert.Single(proposals);
+        Assert.Equal("proposal-1", proposals.Single().Id);
+    }
+
+    [Fact]
+    public async Task GetAllPendingSongs_WhenProposalHasNullSpotifyIdOrCover_DeserializesSuccessfully()
+    {
+        await using var db = CreateContext();
+        var rawJson = JsonSerializer.Serialize(new
+        {
+            id = "custom-guid",
+            songId = 123,
+            spotifyId = (string?)null,
+            title = "Custom Song",
+            artist = "Local Artist",
+            cover = (string?)null,
+            durationMs = 210000,
+            breakId = 1,
+            breakNumber = 1,
+            userId = 5,
+            submittedBy = "jan.kowalski",
+            submittedAt = DateTime.UtcNow
+        });
+
+        var (controller, _, _) = CreateModerationController(db, rawJson);
+        var result = Assert.IsType<OkObjectResult>(await controller.GetAllPendingSongs());
+        var proposals = (IEnumerable<ModerationController.SongProposalDto>)result.Value!.GetType().GetProperty("Proposals")!.GetValue(result.Value)!;
+
+        Assert.Single(proposals);
+        var item = proposals.Single();
+        Assert.Equal("custom-guid", item.Id);
+        Assert.Null(item.SpotifyId);
+        Assert.Null(item.Cover);
+        Assert.Equal("Custom Song", item.Title);
     }
 
     [Fact]

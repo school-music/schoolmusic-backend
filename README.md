@@ -1,4 +1,4 @@
-# SchoolMusic Backend
+﻿# SchoolMusic Backend
 
 [![Schoolmusic CI](https://github.com/school-music/schoolmusic-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/school-music/schoolmusic-backend/actions/workflows/ci.yml)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
@@ -60,7 +60,7 @@ W wielu szkołach radiowęzeł jest obsługiwany ręcznie przez pojedyncze osoby
 | **Silnik Audio** | `SpotifyAPI.Web` / `LibVLCSharp` | Hybrydowe sterowanie Spotify Connect oraz lokalny silnik VLC |
 | **Dokumentacja API** | `OpenAPI` + `Scalar.AspNetCore` | Nowoczesny, interaktywny interfejs testowania endpointów REST |
 | **Konteneryzacja** | `Docker & Docker Compose` | Zapewnia powtarzalność i start całego stosu jedną komendą |
-| **Testy i Jakość** | `xUnit`, `Moq`, `FluentAssertions` | Zestaw 149 testów jednostkowych i integracyjnych |
+| **Testy i Jakość** | `xUnit`, `Moq`, `FluentAssertions` | Zestaw 183 testów jednostkowych i integracyjnych |
 | **CI/CD** | `GitHub Actions` | Automatyczna budowa, testy pokrycia kodu i weryfikacja Dockera |
 
 ---
@@ -163,7 +163,7 @@ Jeśli chcesz rozwijać aplikację lokalnie na maszynie bez kontenera API:
 
 ## Testy jednostkowe i integracyjne
 
-Projekt posiada rozbudowany pakiet **149 zautomatyzowanych testów** sprawdzających logikę algorytmów kolejkowania, harmonogramu, moderacji oraz autoryzacji:
+Projekt posiada rozbudowany pakiet **183 zautomatyzowanych testów** sprawdzających logikę algorytmów kolejkowania, harmonogramu, moderacji oraz autoryzacji:
 
 ```bash
 # Uruchomienie wszystkich testów
@@ -177,6 +177,20 @@ Każdy Pull Request oraz push do gałęzi `main` jest automatycznie testowany pr
 
 ---
 
+## Logowanie kontami szkolnymi (LDAP / Active Directory)
+
+System **SchoolMusic** umożliwia logowanie uczniów bezpośrednio ich kontami ze szkolnego katalogu komputerowego (Active Directory / OpenLDAP) z mechanizmem automatycznego tworzenia kont (**JIT provisioning**).
+
+* 🔐 **Dedykowany przewodnik dla administratora szkoły:** Szczegółowe instrukcje, parametry i kwestionariusz znajdują się w [docs/LDAP_INTEGRATION_GUIDE.md](docs/LDAP_INTEGRATION_GUIDE.md).
+* 🧪 **Lokalny serwer OpenLDAP do testów:** Możliwość uruchomienia gotowego kontenera LDAP z testowymi kontami uczniów:
+  `ash
+  docker compose -f docker-compose.yml -f docker-compose.ldap.yml up -d
+  `
+  Konta testowe w OpenLDAP:
+  - jan.kowalski / SzkolaPassword123!
+  - nna.nowak / SzkolaPassword123!
+
+---
 ## Materiały konkursowe
 
 * 🎤 **Konspekt prezentacji przed komisją:** Szczegółowe omówienie 10 punktów regulaminowych (Sekcje 14 i 15) znajduje się w pliku [`docs/PREZENTACJA.md`](docs/PREZENTACJA.md).

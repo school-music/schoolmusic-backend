@@ -1,0 +1,48 @@
+# Testowa struktura LDAP dla środowiska szkolnego SchoolMusic
+# Domena: dc=szkola,dc=edu,dc=pl
+
+# Jednostka organizacyjna Użytkownicy
+dn: ou=Users,dc=szkola,dc=edu,dc=pl
+objectClass: organizationalUnit
+ou: Users
+
+# Grupa szkolna Uczniowie
+dn: cn=Uczniowie,ou=Users,dc=szkola,dc=edu,dc=pl
+objectClass: top
+objectClass: posixGroup
+cn: Uczniowie
+gidNumber: 5000
+
+# Konto ucznia: jan.kowalski (Hasło: SzkolaPassword123!)
+dn: uid=jan.kowalski,ou=Users,dc=szkola,dc=edu,dc=pl
+objectClass: top
+objectClass: person
+objectClass: organizationalPerson
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: jan.kowalski
+cn: Jan Kowalski
+sn: Kowalski
+givenName: Jan
+mail: jan.kowalski@szkola.edu.pl
+userPassword: SzkolaPassword123!
+uidNumber: 10001
+gidNumber: 5000
+homeDirectory: /home/jan.kowalski
+
+# Konto uczennicy: anna.nowak (Hasło: SzkolaPassword123!)
+dn: uid=anna.nowak,ou=Users,dc=szkola,dc=edu,dc=pl
+objectClass: top
+objectClass: person
+objectClass: organizationalPerson
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: anna.nowak
+cn: Anna Nowak
+sn: Nowak
+givenName: Anna
+mail: anna.nowak@szkola.edu.pl
+userPassword: SzkolaPassword123!
+uidNumber: 10002
+gidNumber: 5000
+homeDirectory: /home/anna.nowak

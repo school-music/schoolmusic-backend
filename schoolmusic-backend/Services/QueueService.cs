@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
 using StackExchange.Redis;
@@ -10,7 +11,15 @@ namespace schoolmusic_backend.Services
     /// <summary>
     /// Reprezentuje żądanie zaproponowania utworu zawierające identyfikatory utworu i przerwy
     /// </summary>
-    public record ProposeSongDto(int? SongId, string? SpotifyId, int? BreakId);
+    public record ProposeSongDto(
+        int? SongId = null,
+        string? SpotifyId = null,
+        int? BreakId = null,
+        string? Title = null,
+        string? Artist = null,
+        string? Genre = null,
+        string? Mp3Url = null
+    );
 
     /// <summary>
     /// Reprezentuje żądanie oddania głosu dla elementu kolejki, opcjonalnie powiązane z utworem lub przerwą
@@ -39,17 +48,54 @@ namespace schoolmusic_backend.Services
         private readonly IConnectionMultiplexer _redis;
         private readonly IHubContext<QueueHub> _hubContext;
         private readonly ISongSourceService _songSourceService;
+        private readonly IConfiguration? _configuration;
 
         public QueueService(
             schoolmusicContext context,
             IConnectionMultiplexer redis,
             IHubContext<QueueHub> hubContext,
-            ISongSourceService songSourceService)
+            ISongSourceService songSourceService,
+            IConfiguration? configuration = null)
         {
             _context = context;
             _redis = redis;
             _hubContext = hubContext;
             _songSourceService = songSourceService;
+            _configuration = configuration;
+        }
+
+        /// <summary>
+        /// Sprawdza, czy głosowanie na daną przerwę jest aktualnie zamknięte.
+        /// Gdy włączona jest opcja Voting:AllowVotingOutsideSchedule (np. w Development), głosowanie jest zawsze otwarte.
+        /// W trybie produkcyjnym głosowanie jest zablokowane wyłącznie w oknie od VoteEnds (lub StartAt) do EndsAt bieżącego dnia.
+        /// </summary>
+        private bool IsVotingClosedForBreak(Break breakEntity, DateTime now)
+        {
+            bool allowOutside = _configuration?.GetValue<bool>("Voting:AllowVotingOutsideSchedule") ?? false;
+            if (allowOutside)
+            {
+                return false;
+            }
+
+            var today = DateOnly.FromDateTime(now);
+            var startAt = today.ToDateTime(TimeOnly.FromDateTime(breakEntity.StartAt));
+            var endsAt = today.ToDateTime(TimeOnly.FromDateTime(breakEntity.EndsAt));
+            if (endsAt <= startAt)
+            {
+                endsAt = endsAt.AddDays(1);
+            }
+
+            var voteEndTime = breakEntity.VoteEnds.HasValue
+                ? today.ToDateTime(TimeOnly.FromDateTime(breakEntity.VoteEnds.Value))
+                : startAt;
+
+            // Okno zamkniętego głosowania to czas od voteEndTime do endsAt
+            if (now >= voteEndTime && now < endsAt)
+            {
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -107,7 +153,13 @@ namespace schoolmusic_backend.Services
             var breakEntity = await _context.Breaks.FindAsync(breakId);
             if (breakEntity == null)
             {
-                return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                // Fallback: jeśli podana przerwa nie istnieje, spróbuj użyć pierwszej dostępnej
+                breakEntity = await _context.Breaks.OrderBy(b => b.BreakNumber).FirstOrDefaultAsync();
+                if (breakEntity == null)
+                {
+                    return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                }
+                breakId = breakEntity.Id;
             }
 
             var items = await _context.QueueItems
@@ -185,6 +237,48 @@ namespace schoolmusic_backend.Services
                 }
             }
 
+            // Fallback: wyszukanie po tytule i opcjonalnie autorze
+            if (song == null && !string.IsNullOrWhiteSpace(dto.Title))
+            {
+                var normTitle = dto.Title.Trim().ToLower();
+                var candidateQuery = _context.Songs.Include(s => s.Artist).Where(s => s.Title.ToLower() == normTitle);
+                if (!string.IsNullOrWhiteSpace(dto.Artist))
+                {
+                    var normArtist = dto.Artist.Trim().ToLower();
+                    song = await candidateQuery.FirstOrDefaultAsync(s => s.Artist != null && s.Artist.Name.ToLower() == normArtist);
+                }
+                song ??= await candidateQuery.FirstOrDefaultAsync();
+
+                // Jeśli utwór nadal nie istnieje, a podano tytuł i wykonawcę (np. zgłoszenie z panelu WWW)
+                if (song == null && !string.IsNullOrWhiteSpace(dto.Artist))
+                {
+                    var artistName = dto.Artist.Trim();
+                    var artist = await _context.Artists.FirstOrDefaultAsync(a => a.Name.ToLower() == artistName.ToLower());
+                    if (artist == null)
+                    {
+                        artist = new Artist { Name = artistName, Source = "other" };
+                        _context.Artists.Add(artist);
+                        await _context.SaveChangesAsync();
+                    }
+
+                    song = new Song
+                    {
+                        Title = dto.Title.Trim(),
+                        ArtistId = artist.Id,
+                        Artist = artist,
+                        Genre = dto.Genre ?? "Inny",
+                        DurationMs = 180000,
+                        Source = "other",
+                        SongUrl = dto.Mp3Url ?? "https://archive.org/download/sample.mp3",
+                        SpotifyId = !string.IsNullOrWhiteSpace(dto.SpotifyId) ? dto.SpotifyId : null,
+                        IsActive = true,
+                        CreatedAt = DateTime.UtcNow
+                    };
+                    _context.Songs.Add(song);
+                    await _context.SaveChangesAsync();
+                }
+            }
+
             if (song == null)
             {
                 return ServiceResult<object>.NotFound("Nie znaleziono utworu w bazie danych ani w Spotify.");
@@ -229,13 +323,7 @@ namespace schoolmusic_backend.Services
             else
             {
                 var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
-                var candidate = allBreaks.FirstOrDefault(b =>
-                {
-                    var voteEndTime = b.VoteEnds.HasValue
-                        ? today.ToDateTime(TimeOnly.FromDateTime(b.VoteEnds.Value))
-                        : today.ToDateTime(TimeOnly.FromDateTime(b.StartAt));
-                    return voteEndTime > now;
-                });
+                var candidate = allBreaks.FirstOrDefault(b => !IsVotingClosedForBreak(b, now));
 
                 if (candidate == null)
                 {
@@ -257,11 +345,7 @@ namespace schoolmusic_backend.Services
             }
 
             // Sprawdzenie czy głosowanie jest jeszcze otwarte
-            var targetVoteEndTime = targetBreakEntity.VoteEnds.HasValue
-                ? today.ToDateTime(TimeOnly.FromDateTime(targetBreakEntity.VoteEnds.Value))
-                : today.ToDateTime(TimeOnly.FromDateTime(targetBreakEntity.StartAt));
-
-            if (dto.BreakId.HasValue && targetVoteEndTime < now)
+            if (dto.BreakId.HasValue && IsVotingClosedForBreak(targetBreakEntity, now))
             {
                 return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę zostało już zamknięte.");
             }
@@ -475,12 +559,7 @@ namespace schoolmusic_backend.Services
             }
 
             var now = DateTime.Now;
-            var today = DateOnly.FromDateTime(now);
-            var voteEndTime = breakEntity.VoteEnds.HasValue
-                ? today.ToDateTime(TimeOnly.FromDateTime(breakEntity.VoteEnds.Value))
-                : today.ToDateTime(TimeOnly.FromDateTime(breakEntity.StartAt));
-
-            if (voteEndTime < now)
+            if (IsVotingClosedForBreak(breakEntity, now))
             {
                 return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę dobiegło już końca.");
             }
@@ -562,7 +641,13 @@ namespace schoolmusic_backend.Services
             var breakEntity = await _context.Breaks.FindAsync(breakId);
             if (breakEntity == null)
             {
-                return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                // Fallback: jeśli podana przerwa nie istnieje, spróbuj użyć pierwszej dostępnej
+                breakEntity = await _context.Breaks.OrderBy(b => b.BreakNumber).FirstOrDefaultAsync();
+                if (breakEntity == null)
+                {
+                    return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                }
+                breakId = breakEntity.Id;
             }
 
             // Pobieramy wszystkie zatwierdzone pozycje z kolejki tej przerwy
