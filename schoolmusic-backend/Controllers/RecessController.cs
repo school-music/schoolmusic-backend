@@ -1,8 +1,9 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Extensions;
+using schoolmusic_backend.Services;
 
 [Route("api/breaks")]
 [ApiController]
@@ -10,10 +11,23 @@ using schoolmusic_backend.Extensions;
 public class RecessController : ControllerBase
 {
     private readonly schoolmusicContext _context;
+    private readonly IBreakSchedulerService? _scheduler;
+    private readonly ISystemStatusService? _statusService;
 
-    public RecessController(schoolmusicContext context)
+    public RecessController(
+        schoolmusicContext context,
+        IBreakSchedulerService? scheduler = null,
+        ISystemStatusService? statusService = null)
     {
         _context = context;
+        _scheduler = scheduler;
+        _statusService = statusService;
+    }
+
+    private void NotifyScheduleUpdated()
+    {
+        _statusService?.InvalidateScheduleCache();
+        _scheduler?.NotifyScheduleChanged();
     }
 
     /// <summary>
@@ -276,6 +290,7 @@ public class RecessController : ControllerBase
 
         _context.ExceptionDays.Add(exceptionDay);
         await _context.SaveChangesAsync();
+        NotifyScheduleUpdated();
 
         return Ok(new
         {
@@ -308,6 +323,7 @@ public class RecessController : ControllerBase
 
         _context.ExceptionDays.Remove(exceptionDay);
         await _context.SaveChangesAsync();
+        NotifyScheduleUpdated();
 
         return Ok(new { Message = "Pomyślnie usunięto dzień wyjątkowy" });
     }
@@ -358,6 +374,7 @@ public class RecessController : ControllerBase
 
         _context.ExceptionBreaks.Add(exceptionBreak);
         await _context.SaveChangesAsync();
+        NotifyScheduleUpdated();
 
         return Ok(new
         {
@@ -390,6 +407,7 @@ public class RecessController : ControllerBase
 
         _context.ExceptionBreaks.Remove(exceptionBreak);
         await _context.SaveChangesAsync();
+        NotifyScheduleUpdated();
 
         return Ok(new { Message = "Pomyślnie usunięto wyjątek przerwy" });
     }
@@ -433,6 +451,7 @@ public class RecessController : ControllerBase
         }
 
         await _context.SaveChangesAsync();
+        NotifyScheduleUpdated();
 
         return Ok(new
         {

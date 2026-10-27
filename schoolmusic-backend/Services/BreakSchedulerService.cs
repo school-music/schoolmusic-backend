@@ -11,6 +11,7 @@ public interface IBreakSchedulerService
     ScheduledBreakPlan? GetCurrentPlan();
     int? GetActiveBreakId();
     Task ProcessTickAsync(CancellationToken stoppingToken = default);
+    void NotifyScheduleChanged();
 }
 
 public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerService
@@ -19,7 +20,9 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     private readonly IHubContext<QueueHub> _hubContext;
     private readonly ILogger<BreakSchedulerService> _logger;
     private readonly IAudioPlayerService? _audioPlayer;
+    private readonly SemaphoreSlim _wakeUpSignal = new(0, 1);
     private readonly object _planLock = new();
+    private TimeSpan _nextDelay = TimeSpan.FromSeconds(5);
     private SystemStatusDto? _lastKioskStatus;
     private PlayerStatusDto? _lastPlayerStatus;
     private int? _activeBreakId;
@@ -31,6 +34,8 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     private bool _localPlaybackActive;
     private bool _resumePending;
     private int? _activeSpecialEventId;
+
+    public TimeSpan NextDelay => _nextDelay;
 
     public BreakSchedulerService(
         IServiceScopeFactory scopeFactory,
@@ -63,6 +68,20 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     }
 
     public Task ProcessTickAsync(CancellationToken stoppingToken = default) => TickAsync(stoppingToken);
+
+    public void NotifyScheduleChanged()
+    {
+        try
+        {
+            if (_wakeUpSignal.CurrentCount == 0)
+            {
+                _wakeUpSignal.Release();
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
 
     public async Task<bool> SkipCurrentTrackAsync()
     {
@@ -110,7 +129,14 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 _logger.LogError(ex, "Break scheduler tick failed.");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            try
+            {
+                await _wakeUpSignal.WaitAsync(_nextDelay, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
     }
 
@@ -156,6 +182,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 await PauseSpotifyForLocalPlaybackAsync(scope.ServiceProvider, cancellationToken);
             _localPlaybackActive = true;
             await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            _nextDelay = TimeSpan.FromSeconds(5);
             return;
         }
 
@@ -219,7 +246,8 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 await CleanupBreakAsync(db, queueService,
                     scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>(),
                     _activeBreakId.Value, cancellationToken);
-            await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            var status = await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            _nextDelay = await CalculateNextDelayAsync(db, status, now, cancellationToken);
             return;
         }
 
@@ -233,7 +261,8 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
 
         if (activeBreak == null)
         {
-            await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            var status = await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            _nextDelay = await CalculateNextDelayAsync(db, status, now, cancellationToken);
             return;
         }
 
@@ -244,7 +273,8 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 await CleanupBreakAsync(db, queueService,
                     scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>(),
                     _activeBreakId.Value, cancellationToken);
-            await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            var status = await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            _nextDelay = await CalculateNextDelayAsync(db, status, now, cancellationToken);
             return;
         }
 
@@ -327,7 +357,8 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             await queueService.BroadcastQueueAsync(activeBreak.Id);
             if (tracks.Count == 0)
             {
-                await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+                var status = await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+                _nextDelay = await CalculateNextDelayAsync(db, status, now, cancellationToken);
                 return;
             }
         }
@@ -338,13 +369,15 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
 
         if (_spotifyTracks.Count == 0)
         {
-            await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            var status = await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+            _nextDelay = await CalculateNextDelayAsync(db, status, now, cancellationToken);
             return;
         }
 
         await SubmitQueueIfNeededAsync(db, queueService, spotify, cancellationToken);
         await PollPlaybackAsync(db, queueService, spotify, cancellationToken);
-        await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+        var finalStatus = await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
+        _nextDelay = await CalculateNextDelayAsync(db, finalStatus, now, cancellationToken);
     }
 
     private async Task SubmitQueueIfNeededAsync(
@@ -577,16 +610,73 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         }
     }
 
-    private async Task BroadcastSchoolStatusIfChangedAsync(IServiceScope scope, CancellationToken cancellationToken)
+    private async Task<SystemStatusDto> BroadcastSchoolStatusIfChangedAsync(IServiceScope scope, CancellationToken cancellationToken)
     {
         var status = await scope.ServiceProvider.GetRequiredService<ISystemStatusService>()
             .GetStatusAsync(cancellationToken);
-        if (_lastKioskStatus != null && !HasKioskStatusChanged(_lastKioskStatus, status))
-            return;
+        if (_lastKioskStatus == null || HasKioskStatusChanged(_lastKioskStatus, status))
+        {
+            await _hubContext.Clients.Group(QueueHub.KioskGroup)
+                .SendAsync("SchoolStatusChanged", status, cancellationToken);
+            _lastKioskStatus = status;
+        }
+        return status;
+    }
 
-        await _hubContext.Clients.Group(QueueHub.KioskGroup)
-            .SendAsync("SchoolStatusChanged", status, cancellationToken);
-        _lastKioskStatus = status;
+    private async Task<TimeSpan> CalculateNextDelayAsync(
+        schoolmusicContext db,
+        SystemStatusDto status,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        if (_activeBreakId.HasValue || _localPlaybackActive || _pausePending || _resumePending || status.CurrentState == SchoolState.Break)
+        {
+            return TimeSpan.FromSeconds(5);
+        }
+
+        try
+        {
+            DateTime? nextTargetTime = status.NextBreakStartsAt;
+
+            var nextEventTime = await db.SpecialEvents
+                .Where(e => e.EventStatus == "pending" && e.StartsAt > now)
+                .OrderBy(e => e.StartsAt)
+                .Select(e => (DateTime?)e.StartsAt)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (nextEventTime.HasValue)
+            {
+                if (!nextTargetTime.HasValue || nextEventTime.Value < nextTargetTime.Value)
+                {
+                    nextTargetTime = nextEventTime.Value;
+                }
+            }
+
+            if (nextTargetTime.HasValue)
+            {
+                var secondsToTarget = (nextTargetTime.Value - now).TotalSeconds;
+                if (secondsToTarget <= 15)
+                {
+                    return TimeSpan.FromSeconds(5);
+                }
+
+                var delaySeconds = Math.Clamp(secondsToTarget - 10, 5, 60);
+                return TimeSpan.FromSeconds(delaySeconds);
+            }
+
+            return TimeSpan.FromMinutes(2);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to calculate adaptive delay; falling back to 5 seconds.");
+            return TimeSpan.FromSeconds(5);
+        }
+    }
+
+    public override void Dispose()
+    {
+        _wakeUpSignal.Dispose();
+        base.Dispose();
     }
 
     private static bool HasKioskStatusChanged(SystemStatusDto previous, SystemStatusDto current) =>

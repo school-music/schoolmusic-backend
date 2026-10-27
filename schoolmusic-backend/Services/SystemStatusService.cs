@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using schoolmusic_backend.Models;
 
 namespace schoolmusic_backend.Services;
@@ -58,6 +59,7 @@ public sealed record SystemStatusDto(
 public interface ISystemStatusService
 {
     Task<SystemStatusDto> GetStatusAsync(CancellationToken cancellationToken = default);
+    void InvalidateScheduleCache();
 }
 
 public sealed class SystemStatusService : ISystemStatusService
@@ -66,11 +68,21 @@ public sealed class SystemStatusService : ISystemStatusService
 
     private readonly schoolmusicContext _context;
     private readonly TimeProvider _timeProvider;
+    private readonly IMemoryCache? _cache;
 
-    public SystemStatusService(schoolmusicContext context, TimeProvider timeProvider)
+    public SystemStatusService(schoolmusicContext context, TimeProvider timeProvider, IMemoryCache? cache = null)
     {
         _context = context;
         _timeProvider = timeProvider;
+        _cache = cache;
+    }
+
+    public void InvalidateScheduleCache()
+    {
+        var today = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
+        _cache?.Remove($"SystemStatus_ExceptionDay_{today:yyyyMMdd}");
+        _cache?.Remove($"SystemStatus_Breaks_{today:yyyyMMdd}");
+        _cache?.Remove("SystemStatus_FallbackBreaks");
     }
 
     public async Task<SystemStatusDto> GetStatusAsync(CancellationToken cancellationToken = default)
@@ -81,15 +93,47 @@ public sealed class SystemStatusService : ISystemStatusService
         sbyte weekday = (sbyte)now.DayOfWeek;
         if (weekday == 0) weekday = 7; 
 
-        var activeExceptionDay = await _context.ExceptionDays
-            .AsNoTracking()
-            .Where(e => e.StartDate <= today && today <= e.EndDate)
-            .FirstOrDefaultAsync(cancellationToken);
+        ExceptionDay? activeExceptionDay;
+        if (_cache != null)
+        {
+            var cacheKey = $"SystemStatus_ExceptionDay_{today:yyyyMMdd}";
+            activeExceptionDay = await _cache.GetOrCreateAsync(cacheKey, async entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
+                return await _context.ExceptionDays
+                    .AsNoTracking()
+                    .Where(e => e.StartDate <= today && today <= e.EndDate)
+                    .FirstOrDefaultAsync(cancellationToken);
+            });
+        }
+        else
+        {
+            activeExceptionDay = await _context.ExceptionDays
+                .AsNoTracking()
+                .Where(e => e.StartDate <= today && today <= e.EndDate)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
 
-        var breaksForToday = await _context.Breaks
-            .AsNoTracking()
-            .Where(b => b.BreakDate == today)
-            .ToListAsync(cancellationToken);
+        List<Break> breaksForToday;
+        if (_cache != null)
+        {
+            var cacheKey = $"SystemStatus_Breaks_{today:yyyyMMdd}";
+            breaksForToday = (await _cache.GetOrCreateAsync(cacheKey, async entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
+                return await _context.Breaks
+                    .AsNoTracking()
+                    .Where(b => b.BreakDate == today)
+                    .ToListAsync(cancellationToken);
+            })) ?? [];
+        }
+        else
+        {
+            breaksForToday = await _context.Breaks
+                .AsNoTracking()
+                .Where(b => b.BreakDate == today)
+                .ToListAsync(cancellationToken);
+        }
 
         bool isWeekend = weekday >= 6;
         bool isDayOff = activeExceptionDay?.DayType == "day_off" || (isWeekend && breaksForToday.Count == 0);
@@ -113,11 +157,27 @@ public sealed class SystemStatusService : ISystemStatusService
             );
         }
 
-        var scheduleRows = breaksForToday.Count > 0
-            ? breaksForToday
-            : (await _context.Breaks.AsNoTracking().OrderByDescending(b => b.BreakDate).ToListAsync(cancellationToken))
+        List<Break> scheduleRows;
+        if (breaksForToday.Count > 0)
+        {
+            scheduleRows = breaksForToday;
+        }
+        else if (_cache != null)
+        {
+            scheduleRows = (await _cache.GetOrCreateAsync("SystemStatus_FallbackBreaks", async entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
+                return (await _context.Breaks.AsNoTracking().OrderByDescending(b => b.BreakDate).ToListAsync(cancellationToken))
+                    .DistinctBy(b => b.BreakNumber)
+                    .ToList();
+            })) ?? [];
+        }
+        else
+        {
+            scheduleRows = (await _context.Breaks.AsNoTracking().OrderByDescending(b => b.BreakDate).ToListAsync(cancellationToken))
                 .DistinctBy(b => b.BreakNumber)
                 .ToList();
+        }
 
         var breaksToday = scheduleRows
             .Select(b => new

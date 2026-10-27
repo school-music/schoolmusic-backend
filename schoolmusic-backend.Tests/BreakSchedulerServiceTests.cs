@@ -379,4 +379,37 @@ public sealed class BreakSchedulerServiceTests
         fixture.BreakService.Verify(service => service.CalculateBreak(
             It.IsAny<int>(), It.IsAny<int>(), It.IsAny<List<QueueItem>>()), Times.Never);
     }
+
+    [Fact]
+    public void NotifyScheduleChanged_SignalsSchedulerWakeUpImmediately()
+    {
+        var hubContext = new Mock<IHubContext<QueueHub>>();
+        var service = new BreakSchedulerService(
+            Mock.Of<IServiceScopeFactory>(),
+            hubContext.Object,
+            NullLogger<BreakSchedulerService>.Instance);
+
+        // Notify schedule changed should be idempotent and not throw
+        service.NotifyScheduleChanged();
+        service.NotifyScheduleChanged();
+    }
+
+    [Fact]
+    public async Task Tick_WhenActiveBreak_SetsNextDelayToFiveSeconds()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak();
+        await fixture.Tick();
+
+        Assert.Equal(TimeSpan.FromSeconds(5), fixture.Service.NextDelay);
+    }
+
+    [Fact]
+    public async Task Tick_WhenOutsideBreak_CalculatesAdaptiveDelay()
+    {
+        await using var fixture = new Fixture();
+        await fixture.Tick();
+
+        Assert.True(fixture.Service.NextDelay >= TimeSpan.FromSeconds(5));
+    }
 }

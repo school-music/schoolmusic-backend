@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
+using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers
 {
@@ -36,11 +37,15 @@ namespace schoolmusic_backend.Controllers
     public class AdminSpecialEventsController : ControllerBase
     {
         private readonly schoolmusicContext _context;
+        private readonly IBreakSchedulerService? _scheduler;
         private static readonly string[] ValidStatuses = { "pending", "playing", "done" };
 
-        public AdminSpecialEventsController(schoolmusicContext context)
+        public AdminSpecialEventsController(
+            schoolmusicContext context,
+            IBreakSchedulerService? scheduler = null)
         {
             _context = context;
+            _scheduler = scheduler;
         }
 
         /// <summary>
@@ -122,6 +127,7 @@ namespace schoolmusic_backend.Controllers
 
             _context.SpecialEvents.Add(ev);
             await _context.SaveChangesAsync();
+            _scheduler?.NotifyScheduleChanged();
 
             var resultDto = new SpecialEventDto(
                 ev.Id,
@@ -163,6 +169,7 @@ namespace schoolmusic_backend.Controllers
             ev.EventStatus = status;
 
             await _context.SaveChangesAsync();
+            _scheduler?.NotifyScheduleChanged();
 
             return Ok(new SpecialEventDto(
                 ev.Id,
@@ -187,6 +194,7 @@ namespace schoolmusic_backend.Controllers
 
             _context.SpecialEvents.Remove(ev);
             await _context.SaveChangesAsync();
+            _scheduler?.NotifyScheduleChanged();
 
             return Ok(new { Message = "Pomyślnie usunięto wydarzenie specjalne.", Id = id });
         }
