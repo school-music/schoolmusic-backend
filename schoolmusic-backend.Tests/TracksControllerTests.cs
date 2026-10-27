@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -289,7 +289,7 @@ public class TracksControllerTests
             });
         var (controller, _) = CreateController(nameof(SearchTracks_ReturnsSpotifySearchResults), songSource: songSource);
 
-        var result = Assert.IsType<OkObjectResult>(await controller.SearchTracks(" test "));
+        var result = Assert.IsType<OkObjectResult>(await controller.SearchTracks(q: "test"));
         var track = Assert.Single(Assert.IsAssignableFrom<IEnumerable<object>>(result.Value));
         Assert.Equal("spotify-id", track.GetType().GetProperty("externalId")?.GetValue(track));
         Assert.Equal("Song", track.GetType().GetProperty("title")?.GetValue(track));
@@ -306,7 +306,7 @@ public class TracksControllerTests
             songSource: songSource,
             spotifyConfigured: false);
 
-        var result = Assert.IsType<ObjectResult>(await controller.SearchTracks("test"));
+        var result = Assert.IsType<ObjectResult>(await controller.SearchTracks(q: "test"));
 
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, result.StatusCode);
         Assert.Contains("Spotify:ClientId", result.Value?.GetType().GetProperty("Message")?.GetValue(result.Value)?.ToString());
@@ -367,5 +367,68 @@ public class TracksControllerTests
         var result = Assert.IsType<ObjectResult>(await controller.AddToFavouritesSpotifyId("spotify-id"));
 
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task SearchTracks_WhenQueryPassedInHeader_ReturnsOkAndCallsSongSource()
+    {
+        var songSource = new Mock<ISongSourceService>();
+        songSource.SetupGet(source => source.IsConfigured).Returns(true);
+        songSource.Setup(source => source.SearchTracksAsync("sanah", 20))
+            .ReturnsAsync(new[]
+            {
+                new ExternalTrackDto("id1", "Sen o Warszawie", "Sanah", null, 200000, null, "spotify")
+            });
+        var (controller, _) = CreateController(nameof(SearchTracks_WhenQueryPassedInHeader_ReturnsOkAndCallsSongSource), songSource: songSource);
+
+        // Parametr q przekazany wyłącznie w nagłówku HTTP
+        var result = Assert.IsType<OkObjectResult>(await controller.SearchTracks(headerQ: "sanah"));
+        var tracks = Assert.IsAssignableFrom<IEnumerable<object>>(result.Value);
+        Assert.Single(tracks);
+    }
+
+    [Fact]
+    public async Task SearchTracks_WhenQueryParameterIsEmpty_Returns400BadRequest()
+    {
+        var (controller, _) = CreateController(nameof(SearchTracks_WhenQueryParameterIsEmpty_Returns400BadRequest));
+
+        var result = await controller.SearchTracks(q: null, headerQ: null, query: null);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task SearchTracks_WhenQueryPassedInLegacyQueryParam_ReturnsOk()
+    {
+        var songSource = new Mock<ISongSourceService>();
+        songSource.SetupGet(source => source.IsConfigured).Returns(true);
+        songSource.Setup(source => source.SearchTracksAsync("chopin", 20))
+            .ReturnsAsync(new[]
+            {
+                new ExternalTrackDto("id2", "Nocturne", "Chopin", null, 300000, null, "spotify")
+            });
+        var (controller, _) = CreateController(nameof(SearchTracks_WhenQueryPassedInLegacyQueryParam_ReturnsOk), songSource: songSource);
+
+        // Parametr przekazany w starym parametrze '?query=...'
+        var result = Assert.IsType<OkObjectResult>(await controller.SearchTracks(query: "chopin"));
+        Assert.Single(Assert.IsAssignableFrom<IEnumerable<object>>(result.Value));
+    }
+
+    [Fact]
+    public async Task SearchTracks_HeaderQTakesPriorityOverQueryParam()
+    {
+        var songSource = new Mock<ISongSourceService>();
+        songSource.SetupGet(source => source.IsConfigured).Returns(true);
+        // Oczekujemy że użyty zostanie "header-value", nie "query-value"
+        songSource.Setup(source => source.SearchTracksAsync("header-value", 20))
+            .ReturnsAsync(new[]
+            {
+                new ExternalTrackDto("id3", "Header Track", "Artist", null, 100000, null, "spotify")
+            });
+        var (controller, _) = CreateController(nameof(SearchTracks_HeaderQTakesPriorityOverQueryParam), songSource: songSource);
+
+        var result = Assert.IsType<OkObjectResult>(
+            await controller.SearchTracks(q: "query-value", headerQ: "header-value"));
+        Assert.Single(Assert.IsAssignableFrom<IEnumerable<object>>(result.Value));
     }
 }

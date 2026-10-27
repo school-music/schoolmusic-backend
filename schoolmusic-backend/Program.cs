@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
 using Scalar.AspNetCore;
@@ -148,6 +148,13 @@ builder.Services.AddScoped<IStatisticsService, StatisticsService>();
 builder.Services.AddSingleton<ILdapService, LdapService>();
 
 var app = builder.Build();
+
+// Walidacja konfiguracji LDAP przy starcie aplikacji
+var ldapService = app.Services.GetRequiredService<ILdapService>();
+if (ldapService is LdapService ldapServiceImpl)
+{
+    ldapServiceImpl.ValidateConfiguration();
+}
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("Features:SwaggerEnabled"))

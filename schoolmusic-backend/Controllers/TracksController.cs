@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using LibVLCSharp.Shared;
@@ -75,11 +75,21 @@ public class TracksController : ControllerBase
         _songSourceService = songSourceService;
     }
 
+    /// <summary>
+    /// Wyszukuje utwory w zewnętrznym katalogu (np. Spotify API).
+    /// Parametr wyszukiwania może być przekazany w nagłówku HTTP 'q', w query stringu '?q=...' lub '?query=...'.
+    /// </summary>
     [HttpGet("search")]
     [AllowAnonymous]
-    public async Task<IActionResult> SearchTracks([FromQuery] string? q)
+    public async Task<IActionResult> SearchTracks(
+        [FromQuery(Name = "q")] string? q = null,
+        [FromHeader(Name = "q")] string? headerQ = null,
+        [FromQuery(Name = "query")] string? query = null)
     {
-        if (string.IsNullOrWhiteSpace(q))
+        var searchQuery = !string.IsNullOrWhiteSpace(headerQ) ? headerQ
+            : (!string.IsNullOrWhiteSpace(q) ? q : query);
+
+        if (string.IsNullOrWhiteSpace(searchQuery))
         {
             return BadRequest(new { Message = "Parametr q jest wymagany." });
         }
@@ -92,7 +102,7 @@ public class TracksController : ControllerBase
             });
         }
 
-        var tracks = await _songSourceService.SearchTracksAsync(q.Trim());
+        var tracks = await _songSourceService.SearchTracksAsync(searchQuery.Trim());
         return Ok(tracks.Select(track => new
         {
             title = track.Title,

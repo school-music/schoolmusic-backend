@@ -1,8 +1,9 @@
-using System.Text;
+﻿using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using schoolmusic_backend.Controllers;
@@ -63,7 +64,9 @@ public class LdapAuthTests
             ["Ldap:Enabled"] = "false"
         });
 
-        var service = new LdapService(config, NullLogger<LdapService>.Instance);
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
         var result = await service.AuthenticateAsync("jan.kowalski", "haslo123");
 
         Assert.False(result.Success);
@@ -81,7 +84,9 @@ public class LdapAuthTests
             ["Ldap:Enabled"] = "true"
         });
 
-        var service = new LdapService(config, NullLogger<LdapService>.Instance);
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
         var result = await service.AuthenticateAsync(login, password);
 
         Assert.False(result.Success);
@@ -101,7 +106,9 @@ public class LdapAuthTests
             ["Ldap:SimulatedUsers:0:Email"] = "jan.kowalski@szkola.edu.pl"
         });
 
-        var service = new LdapService(config, NullLogger<LdapService>.Instance);
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
         var result = await service.AuthenticateAsync("jan.kowalski", "Szkola2026!");
 
         Assert.True(result.Success);
@@ -122,7 +129,9 @@ public class LdapAuthTests
             ["Ldap:SimulatedUsers:0:Password"] = "Szkola2026!"
         });
 
-        var service = new LdapService(config, NullLogger<LdapService>.Instance);
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
         var result = await service.AuthenticateAsync("jan.kowalski", "ZleHaslo123");
 
         Assert.False(result.Success);
@@ -140,7 +149,9 @@ public class LdapAuthTests
             ["Ldap:SimulatedUsers:0:Password"] = "Szkola2026!"
         });
 
-        var service = new LdapService(config, NullLogger<LdapService>.Instance);
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
         var result = await service.AuthenticateAsync("nieznany.uczen", "haslo");
 
         Assert.False(result.Success);
@@ -158,7 +169,9 @@ public class LdapAuthTests
             ["Ldap:SimulatedUsers:0:Password"] = "Szkola2026!"
         });
 
-        var service = new LdapService(config, NullLogger<LdapService>.Instance);
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
         
         var resultEmail = await service.AuthenticateAsync("jan.kowalski@szkola.edu.pl", "Szkola2026!");
         Assert.True(resultEmail.Success);
@@ -452,4 +465,172 @@ public class LdapAuthTests
     }
 
     #endregion
+
+    #region LdapService Security Tests
+
+    [Theory]
+    [InlineData("user*", "user\\2a")]
+    [InlineData("user(name", "user\\28name")]
+    [InlineData("user)name", "user\\29name")]
+    [InlineData("user\\name", "user\\5cname")]
+    [InlineData("normal.user", "normal.user")]
+    [InlineData("jan@szkola.edu.pl", "jan@szkola.edu.pl")]
+    public void LdapService_EscapeLdapFilterValue_EscapesSpecialCharactersCorrectly(string input, string expected)
+    {
+        var result = LdapService.EscapeLdapFilterValue(input);
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public async Task LdapService_SimulatedMode_InjectionAttemptInLogin_ReturnsFail()
+    {
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Ldap:Enabled"] = "true",
+            ["Ldap:SimulatedMode"] = "true",
+            ["Ldap:SimulatedUsers:0:Login"] = "jan.kowalski",
+            ["Ldap:SimulatedUsers:0:Password"] = "Szkola2026!"
+        });
+
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
+
+        // Próba LDAP injection - login z nawiasami i gwiazdką
+        var result = await service.AuthenticateAsync("*)(uid=*))(|(uid=*", "Szkola2026!");
+
+        Assert.False(result.Success);
+    }
+
+    [Fact]
+    public void LdapService_ValidateConfiguration_SimulatedModeInProduction_ThrowsException()
+    {
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Ldap:Enabled"] = "true",
+            ["Ldap:SimulatedMode"] = "true"
+        });
+
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Production");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
+
+        // Tryb symulacyjny na produkcji powinien rzucić wyjątek
+        Assert.Throws<InvalidOperationException>(() => service.ValidateConfiguration());
+    }
+
+    [Fact]
+    public void LdapService_ValidateConfiguration_SimulatedModeInDevelopment_DoesNotThrow()
+    {
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Ldap:Enabled"] = "true",
+            ["Ldap:SimulatedMode"] = "true"
+        });
+
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
+
+        // W Development tryb symulacyjny jest dozwolony
+        var exception = Record.Exception(() => service.ValidateConfiguration());
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void LdapService_ValidateConfiguration_WhenDisabled_DoesNotThrow()
+    {
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Ldap:Enabled"] = "false",
+            ["Ldap:SimulatedMode"] = "false"
+        });
+
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Production");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
+
+        var exception = Record.Exception(() => service.ValidateConfiguration());
+        Assert.Null(exception);
+    }
+
+    #endregion
+
+    [Fact]
+    public async Task LdapService_RequiredGroup_WhenUserNotInRequiredGroup_ReturnsFail()
+    {
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Ldap:Enabled"] = "true",
+            ["Ldap:SimulatedMode"] = "true",
+            ["Ldap:RequiredGroup"] = "Radiowęzeł",
+            ["Ldap:SimulatedUsers:0:Login"] = "jan.kowalski",
+            ["Ldap:SimulatedUsers:0:Password"] = "Szkola2026!",
+            ["Ldap:SimulatedUsers:0:Groups:0"] = "Uczniowie"
+        });
+
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
+
+        var result = await service.AuthenticateAsync("jan.kowalski", "Szkola2026!");
+
+        Assert.False(result.Success);
+        Assert.Contains("uprawnień", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task LdapService_RequiredGroup_WhenUserInRequiredGroup_ReturnsSuccess()
+    {
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Ldap:Enabled"] = "true",
+            ["Ldap:SimulatedMode"] = "true",
+            ["Ldap:RequiredGroup"] = "Radiowęzeł",
+            ["Ldap:SimulatedUsers:0:Login"] = "jan.kowalski",
+            ["Ldap:SimulatedUsers:0:Password"] = "Szkola2026!",
+            ["Ldap:SimulatedUsers:0:Groups:0"] = "Uczniowie",
+            ["Ldap:SimulatedUsers:0:Groups:1"] = "Radiowęzeł"
+        });
+
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
+
+        var result = await service.AuthenticateAsync("jan.kowalski", "Szkola2026!");
+
+        Assert.True(result.Success);
+        Assert.NotNull(result.User);
+    }
+
+    [Fact]
+    public async Task SchoolLogin_WhenConcurrentFirstLogins_DoesNotProduceDuplicateUsers()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using var context = CreateInMemoryContext(dbName);
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
+            ["Jwt:Issuer"] = "TestIssuer",
+            ["Jwt:Audience"] = "TestAudience"
+        });
+
+        var mockLdap = new Mock<ILdapService>();
+        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        mockLdap.Setup(l => l.AuthenticateAsync("concurrent.user", "pass123", default))
+            .ReturnsAsync(LdapAuthResult.Ok(new LdapUser("concurrent.user", "Concurrent", "c@szkola.pl", new[] { "Uczniowie" })));
+
+        var controller = CreateController(context, config, mockLdap.Object);
+
+        var task1 = controller.SchoolLogin(new UsersController.SchoolLoginDto { login = "concurrent.user", password = "pass123" });
+        var task2 = controller.SchoolLogin(new UsersController.SchoolLoginDto { login = "concurrent.user", password = "pass123" });
+
+        var results = await Task.WhenAll(task1, task2);
+
+        Assert.All(results, r => Assert.IsType<OkObjectResult>(r));
+
+        using var verificationDb = CreateInMemoryContext(dbName);
+        var count = await verificationDb.Users.CountAsync(u => u.UserLogin == "concurrent.user");
+        Assert.Equal(1, count);
+    }
 }

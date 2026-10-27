@@ -54,16 +54,63 @@ public class LdapService : ILdapService
 {
     private readonly IConfiguration _configuration;
     private readonly ILogger<LdapService> _logger;
+    private readonly IWebHostEnvironment _environment;
 
-    public LdapService(IConfiguration configuration, ILogger<LdapService> logger)
+    public LdapService(IConfiguration configuration, ILogger<LdapService> logger, IWebHostEnvironment environment)
     {
         _configuration = configuration;
         _logger = logger;
+        _environment = environment;
     }
 
     public bool IsEnabled => _configuration.GetValue<bool>("Ldap:Enabled", true);
 
     public bool IsSimulatedMode => _configuration.GetValue<bool>("Ldap:SimulatedMode", false);
+
+    /// <summary>
+    /// Waliduje konfigurację LDAP przy starcie aplikacji. Rzuca InvalidOperationException gdy konfiguracja jest niepoprawna.
+    /// </summary>
+    public void ValidateConfiguration()
+    {
+        // Tryb symulacyjny nie może działać poza środowiskiem deweloperskim
+        if (IsSimulatedMode && !_environment.IsDevelopment())
+        {
+            throw new InvalidOperationException(
+                "BŁĄD KRYTYCZNY: Ldap:SimulatedMode=true jest dozwolony wyłącznie w środowisku Development. " +
+                "Wyłącz tryb symulacyjny w konfiguracji produkcyjnej.");
+        }
+
+        if (!IsEnabled)
+        {
+            _logger.LogInformation("Usługa LDAP jest wyłączona (Ldap:Enabled=false).");
+            return;
+        }
+
+        if (IsSimulatedMode)
+        {
+            _logger.LogWarning(
+                "UWAGA: Usługa LDAP działa w trybie SYMULACYJNYM (Ldap:SimulatedMode=true). " +
+                "Nie używaj tego trybu poza środowiskiem deweloperskim.");
+            return;
+        }
+
+        // W trybie produkcyjnym sprawdź niezbędne ustawienia
+        var server = _configuration["Ldap:Server"];
+        if (string.IsNullOrWhiteSpace(server))
+        {
+            _logger.LogWarning(
+                "Ldap:Server nie jest skonfigurowany. Ustawienie wartości domyślnej 'localhost'. " +
+                "Skonfiguruj poprawny adres serwera LDAP.");
+        }
+
+        var useSsl = _configuration.GetValue<bool>("Ldap:UseSsl", false);
+        if (!useSsl)
+        {
+            _logger.LogWarning(
+                "Ldap:UseSsl=false. Hasła użytkowników będą przesyłane niezaszyfrowane. " +
+                "Zalecane jest włączenie LDAPS lub StartTLS przed wdrożeniem produkcyjnym.");
+        }
+    }
 
     public async Task<LdapAuthResult> AuthenticateAsync(string login, string password, CancellationToken cancellationToken = default)
     {
@@ -102,12 +149,26 @@ public class LdapService : ILdapService
                 var confPass = userSec["Password"] ?? "";
                 if (confPass == password)
                 {
+                    var configuredGroups = userSec.GetSection("Groups").Get<string[]>() ?? new[] { "Uczniowie" };
                     var user = new LdapUser(
                         Username: normalizedLogin,
                         DisplayName: userSec["DisplayName"] ?? normalizedLogin,
                         Email: userSec["Email"] ?? $"{normalizedLogin}@szkola.edu.pl",
-                        Groups: new[] { "Uczniowie" }
+                        Groups: configuredGroups
                     );
+
+                    // Sprawdzenie wymaganej grupy jeśli skonfigurowana
+                    var requiredGroup = _configuration["Ldap:RequiredGroup"];
+                    if (!string.IsNullOrWhiteSpace(requiredGroup))
+                    {
+                        bool inGroup = user.Groups.Any(g => string.Equals(g, requiredGroup, StringComparison.OrdinalIgnoreCase));
+                        if (!inGroup)
+                        {
+                            _logger.LogWarning("Symulowany użytkownik '{Login}' nie należy do wymaganej grupy '{RequiredGroup}'.", normalizedLogin, requiredGroup);
+                            return LdapAuthResult.Fail("Konto szkolne nie posiada uprawnień do korzystania z systemu radiowęzła.");
+                        }
+                    }
+
                     return LdapAuthResult.Ok(user);
                 }
 
@@ -115,18 +176,9 @@ public class LdapService : ILdapService
             }
         }
 
-        // Jeżeli w trybie demo podano login o formacie imie.nazwisko i hasło demo
-        if (Regex.IsMatch(normalizedLogin, @"^[a-zA-Z0-9_\.\-]+$") && password.Length >= 6 && password.EndsWith("!"))
-        {
-            var user = new LdapUser(
-                Username: normalizedLogin,
-                DisplayName: normalizedLogin,
-                Email: $"{normalizedLogin}@szkola.edu.pl",
-                Groups: new[] { "Uczniowie" }
-            );
-            return LdapAuthResult.Ok(user);
-        }
-
+        // W trybie demo akceptujemy wyłącznie użytkowników z listy SimulatedUsers.
+        // Nie stosujemy fallbacku na podstawie wzorca hasła – zapobiega to przypadkowemu
+        // ominięciu listy testowej i poprawia bezpieczeństwo.
         return LdapAuthResult.Fail("Nie znaleziono użytkownika w szkolnym katalogu kont.");
     }
 
@@ -181,7 +233,10 @@ public class LdapService : ILdapService
             {
                 try
                 {
-                    var filter = string.Format(userSearchFilter, normalizedLogin);
+                    // Escapowanie wartości loginu w filtrze LDAP - ochrona przed LDAP injection
+                    var escapedLogin = EscapeLdapFilterValue(normalizedLogin);
+                    var filter = string.Format(userSearchFilter, escapedLogin);
+
                     var searchResults = await connection.SearchAsync(
                         searchBase,
                         LdapConnection.ScopeSub,
@@ -216,6 +271,23 @@ public class LdapService : ILdapService
             connection.Disconnect();
 
             var ldapUser = new LdapUser(normalizedLogin, displayName, email, groups);
+
+            // Sprawdzenie przynależności do wymaganej grupy
+            var requiredGroup = _configuration["Ldap:RequiredGroup"];
+            if (!string.IsNullOrWhiteSpace(requiredGroup))
+            {
+                bool inGroup = ldapUser.Groups.Any(g =>
+                    string.Equals(g, requiredGroup, StringComparison.OrdinalIgnoreCase) ||
+                    g.Contains($"CN={requiredGroup}", StringComparison.OrdinalIgnoreCase));
+
+                if (!inGroup)
+                {
+                    _logger.LogWarning("Użytkownik LDAP '{Login}' nie należy do wymaganej grupy '{RequiredGroup}'. Grupy: [{Groups}]",
+                        normalizedLogin, requiredGroup, string.Join(", ", ldapUser.Groups));
+                    return LdapAuthResult.Fail("Konto szkolne nie posiada uprawnień do korzystania z systemu radiowęzła.");
+                }
+            }
+
             return LdapAuthResult.Ok(ldapUser);
         }
         catch (LdapException ldapEx)
@@ -228,13 +300,32 @@ public class LdapService : ILdapService
                 return LdapAuthResult.Fail("Błędny login lub hasło konta szkolnego.");
             }
 
-            return LdapAuthResult.Fail($"Błąd serwera katalogowego LDAP: {ldapEx.Message}");
+            // Nie zwracamy szczegółów błędu LDAP do klienta
+            return LdapAuthResult.Fail("Błąd komunikacji z serwerem kont szkolnych.");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Nieoczekiwany wyjątek podczas komunikacji z serwerem LDAP: {Message}", ex.Message);
             return LdapAuthResult.Fail("Błąd połączenia ze szkolnym serwerem kont.");
         }
+    }
+
+    /// <summary>
+    /// Escapuje znaki specjalne w wartości filtra LDAP zgodnie z RFC 4515 (ochrona przed LDAP injection).
+    /// Znaki: \ * ( ) \0 / wymagają escapowania.
+    /// </summary>
+    public static string EscapeLdapFilterValue(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        return value
+            .Replace("\\", "\\5c")
+            .Replace("*",  "\\2a")
+            .Replace("(",  "\\28")
+            .Replace(")",  "\\29")
+            .Replace("\0", "\\00")
+            .Replace("/",  "\\2f");
     }
 
     private static string NormalizeLogin(string login)

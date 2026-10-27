@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using schoolmusic_backend.Models;
@@ -142,11 +142,24 @@ public class UsersController : ControllerBase
                     PasswordChangedAt = DateTime.UtcNow
                 };
 
-                _context.Users.Add(newUser);
-                await _context.SaveChangesAsync();
-                await _context.Entry(newUser).Reference(u => u.Rank).LoadAsync();
-
-                return GenerateLoginResponse(newUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                try
+                {
+                    _context.Users.Add(newUser);
+                    await _context.SaveChangesAsync();
+                    await _context.Entry(newUser).Reference(u => u.Rank).LoadAsync();
+                    return GenerateLoginResponse(newUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                }
+                catch (DbUpdateException)
+                {
+                    _context.Entry(newUser).State = EntityState.Detached;
+                    var parallelUser = await _context.Users.Include(u => u.Rank)
+                        .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
+                    if (parallelUser != null)
+                    {
+                        return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                    }
+                    throw;
+                }
             }
         }
 
@@ -215,11 +228,24 @@ public class UsersController : ControllerBase
             PasswordChangedAt = DateTime.UtcNow
         };
 
-        _context.Users.Add(newUser);
-        await _context.SaveChangesAsync();
-        await _context.Entry(newUser).Reference(u => u.Rank).LoadAsync();
-
-        return GenerateLoginResponse(newUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+        try
+        {
+            _context.Users.Add(newUser);
+            await _context.SaveChangesAsync();
+            await _context.Entry(newUser).Reference(u => u.Rank).LoadAsync();
+            return GenerateLoginResponse(newUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+        }
+        catch (DbUpdateException)
+        {
+            _context.Entry(newUser).State = EntityState.Detached;
+            var parallelUser = await _context.Users.Include(u => u.Rank)
+                .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
+            if (parallelUser != null)
+            {
+                return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+            }
+            throw;
+        }
     }
 
     /// <summary>
