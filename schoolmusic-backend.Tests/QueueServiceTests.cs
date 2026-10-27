@@ -1,5 +1,6 @@
-﻿using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Moq;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
@@ -22,7 +23,8 @@ public class QueueServiceTests
         string dbName,
         Mock<ISongSourceService>? songSource = null,
         bool spotifyConfigured = true,
-        Mock<IConnectionMultiplexer>? redisConnection = null)
+        Mock<IConnectionMultiplexer>? redisConnection = null,
+        IConfiguration? configuration = null)
     {
         var context = CreateInMemoryContext(dbName);
         if (redisConnection == null)
@@ -46,7 +48,7 @@ public class QueueServiceTests
         songSource ??= new Mock<ISongSourceService>();
         songSource.SetupGet(source => source.IsConfigured).Returns(spotifyConfigured);
 
-        var service = new QueueService(context, redisConnection.Object, mockHub.Object, songSource.Object);
+        var service = new QueueService(context, redisConnection.Object, mockHub.Object, songSource.Object, configuration);
         return (service, context);
     }
 
@@ -338,5 +340,200 @@ public class QueueServiceTests
 
         Assert.True(result.Success);
         Assert.Equal(200, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task ProposeSongAsync_WhenVotingAllowedOutsideSchedule_AllowsProposalAtAnyTime()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Voting:AllowVotingOutsideSchedule"] = "true"
+            })
+            .Build();
+
+        var (service, context) = CreateService(
+            nameof(ProposeSongAsync_WhenVotingAllowedOutsideSchedule_AllowsProposalAtAnyTime),
+            configuration: config);
+
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now.AddMinutes(-5), EndsAt = now.AddMinutes(5), VoteEnds = now.AddMinutes(-5),
+            MusicEnabled = true
+        };
+        context.Breaks.Add(breakEntity);
+        await context.SaveChangesAsync();
+
+        var dto = new ProposeSongDto(
+            BreakId: 1,
+            Title: "Zezwolony Utwór",
+            Artist: "Artysta",
+            Genre: "Rock"
+        );
+
+        var result = await service.ProposeSongAsync(dto, currentUserId: 1);
+
+        Assert.True(result.Success);
+        Assert.Contains(result.StatusCode, new[] { 200, 202 });
+    }
+
+    [Fact]
+    public async Task VoteAsync_WhenVotingAllowedOutsideSchedule_AllowsVoteAtAnyTime()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Voting:AllowVotingOutsideSchedule"] = "true"
+            })
+            .Build();
+
+        var (service, context) = CreateService(
+            nameof(VoteAsync_WhenVotingAllowedOutsideSchedule_AllowsVoteAtAnyTime),
+            configuration: config);
+
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now.AddMinutes(-5), EndsAt = now.AddMinutes(5), VoteEnds = now.AddMinutes(-5),
+            MusicEnabled = true
+        };
+        context.Breaks.Add(breakEntity);
+
+        var song = new Song { Id = 1, Title = "Głosowany Utwór", DurationMs = 200000, Source = "spotify" };
+        context.Songs.Add(song);
+
+        var queueItem = new QueueItem
+        {
+            Id = 1, BreakId = 1, SongId = 1, UserId = 2,
+            ModerationStatus = "approved", Status = "queued", OrderIndex = 1
+        };
+        context.QueueItems.Add(queueItem);
+        await context.SaveChangesAsync();
+
+        var dto = new VoteRequestDto(QueueItemId: 1);
+        var result = await service.VoteAsync(dto, currentUserId: 1);
+
+        Assert.True(result.Success);
+        Assert.Equal(200, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task ProposeSongAsync_WhenVotingNotAllowedOutsideSchedule_BlocksDuringBreakWindow()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Voting:AllowVotingOutsideSchedule"] = "false"
+            })
+            .Build();
+
+        var (service, context) = CreateService(
+            nameof(ProposeSongAsync_WhenVotingNotAllowedOutsideSchedule_BlocksDuringBreakWindow),
+            configuration: config);
+
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now.AddMinutes(-2), EndsAt = now.AddMinutes(8), VoteEnds = now.AddMinutes(-2),
+            MusicEnabled = true
+        };
+        context.Breaks.Add(breakEntity);
+        await context.SaveChangesAsync();
+
+        var dto = new ProposeSongDto(
+            BreakId: 1,
+            Title: "Zablokowany Utwór",
+            Artist: "Artysta",
+            Genre: "Rock"
+        );
+
+        var result = await service.ProposeSongAsync(dto, currentUserId: 1);
+
+        Assert.False(result.Success);
+        Assert.Equal(400, result.StatusCode);
+        Assert.Equal("Głosowanie na tę przerwę zostało już zamknięte.", result.Message);
+    }
+
+    [Fact]
+    public async Task VoteAsync_WhenVotingNotAllowedOutsideSchedule_BlocksDuringBreakWindow()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Voting:AllowVotingOutsideSchedule"] = "false"
+            })
+            .Build();
+
+        var (service, context) = CreateService(
+            nameof(VoteAsync_WhenVotingNotAllowedOutsideSchedule_BlocksDuringBreakWindow),
+            configuration: config);
+
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now.AddMinutes(-2), EndsAt = now.AddMinutes(8), VoteEnds = now.AddMinutes(-2),
+            MusicEnabled = true
+        };
+        context.Breaks.Add(breakEntity);
+
+        var song = new Song { Id = 1, Title = "Utwór", DurationMs = 200000, Source = "spotify" };
+        context.Songs.Add(song);
+
+        var queueItem = new QueueItem
+        {
+            Id = 1, BreakId = 1, SongId = 1, UserId = 2,
+            ModerationStatus = "approved", Status = "queued", OrderIndex = 1
+        };
+        context.QueueItems.Add(queueItem);
+        await context.SaveChangesAsync();
+
+        var dto = new VoteRequestDto(QueueItemId: 1);
+        var result = await service.VoteAsync(dto, currentUserId: 1);
+
+        Assert.False(result.Success);
+        Assert.Equal(400, result.StatusCode);
+        Assert.Equal("Głosowanie na tę przerwę dobiegło już końca.", result.Message);
+    }
+
+    [Fact]
+    public async Task ProposeSongAsync_WhenVotingOutsideSchedule_AllowsProposalForNextDayCycle()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Voting:AllowVotingOutsideSchedule"] = "false"
+            })
+            .Build();
+
+        var (service, context) = CreateService(
+            nameof(ProposeSongAsync_WhenVotingOutsideSchedule_AllowsProposalForNextDayCycle),
+            configuration: config);
+
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now.AddHours(-5), EndsAt = now.AddHours(-4), VoteEnds = now.AddHours(-5),
+            MusicEnabled = true
+        };
+        context.Breaks.Add(breakEntity);
+        await context.SaveChangesAsync();
+
+        var dto = new ProposeSongDto(
+            BreakId: 1,
+            Title: "Wieczorne Zgłoszenie",
+            Artist: "Artysta",
+            Genre: "Rock"
+        );
+
+        var result = await service.ProposeSongAsync(dto, currentUserId: 1);
+
+        Assert.True(result.Success);
+        Assert.Contains(result.StatusCode, new[] { 200, 202 });
     }
 }

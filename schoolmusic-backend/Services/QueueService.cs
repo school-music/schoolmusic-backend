@@ -1,5 +1,6 @@
-﻿using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
 using StackExchange.Redis;
@@ -47,17 +48,54 @@ namespace schoolmusic_backend.Services
         private readonly IConnectionMultiplexer _redis;
         private readonly IHubContext<QueueHub> _hubContext;
         private readonly ISongSourceService _songSourceService;
+        private readonly IConfiguration? _configuration;
 
         public QueueService(
             schoolmusicContext context,
             IConnectionMultiplexer redis,
             IHubContext<QueueHub> hubContext,
-            ISongSourceService songSourceService)
+            ISongSourceService songSourceService,
+            IConfiguration? configuration = null)
         {
             _context = context;
             _redis = redis;
             _hubContext = hubContext;
             _songSourceService = songSourceService;
+            _configuration = configuration;
+        }
+
+        /// <summary>
+        /// Sprawdza, czy głosowanie na daną przerwę jest aktualnie zamknięte.
+        /// Gdy włączona jest opcja Voting:AllowVotingOutsideSchedule (np. w Development), głosowanie jest zawsze otwarte.
+        /// W trybie produkcyjnym głosowanie jest zablokowane wyłącznie w oknie od VoteEnds (lub StartAt) do EndsAt bieżącego dnia.
+        /// </summary>
+        private bool IsVotingClosedForBreak(Break breakEntity, DateTime now)
+        {
+            bool allowOutside = _configuration?.GetValue<bool>("Voting:AllowVotingOutsideSchedule") ?? false;
+            if (allowOutside)
+            {
+                return false;
+            }
+
+            var today = DateOnly.FromDateTime(now);
+            var startAt = today.ToDateTime(TimeOnly.FromDateTime(breakEntity.StartAt));
+            var endsAt = today.ToDateTime(TimeOnly.FromDateTime(breakEntity.EndsAt));
+            if (endsAt <= startAt)
+            {
+                endsAt = endsAt.AddDays(1);
+            }
+
+            var voteEndTime = breakEntity.VoteEnds.HasValue
+                ? today.ToDateTime(TimeOnly.FromDateTime(breakEntity.VoteEnds.Value))
+                : startAt;
+
+            // Okno zamkniętego głosowania to czas od voteEndTime do endsAt
+            if (now >= voteEndTime && now < endsAt)
+            {
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -285,13 +323,7 @@ namespace schoolmusic_backend.Services
             else
             {
                 var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
-                var candidate = allBreaks.FirstOrDefault(b =>
-                {
-                    var voteEndTime = b.VoteEnds.HasValue
-                        ? today.ToDateTime(TimeOnly.FromDateTime(b.VoteEnds.Value))
-                        : today.ToDateTime(TimeOnly.FromDateTime(b.StartAt));
-                    return voteEndTime > now;
-                });
+                var candidate = allBreaks.FirstOrDefault(b => !IsVotingClosedForBreak(b, now));
 
                 if (candidate == null)
                 {
@@ -313,11 +345,7 @@ namespace schoolmusic_backend.Services
             }
 
             // Sprawdzenie czy głosowanie jest jeszcze otwarte
-            var targetVoteEndTime = targetBreakEntity.VoteEnds.HasValue
-                ? today.ToDateTime(TimeOnly.FromDateTime(targetBreakEntity.VoteEnds.Value))
-                : today.ToDateTime(TimeOnly.FromDateTime(targetBreakEntity.StartAt));
-
-            if (dto.BreakId.HasValue && targetVoteEndTime < now)
+            if (dto.BreakId.HasValue && IsVotingClosedForBreak(targetBreakEntity, now))
             {
                 return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę zostało już zamknięte.");
             }
@@ -531,12 +559,7 @@ namespace schoolmusic_backend.Services
             }
 
             var now = DateTime.Now;
-            var today = DateOnly.FromDateTime(now);
-            var voteEndTime = breakEntity.VoteEnds.HasValue
-                ? today.ToDateTime(TimeOnly.FromDateTime(breakEntity.VoteEnds.Value))
-                : today.ToDateTime(TimeOnly.FromDateTime(breakEntity.StartAt));
-
-            if (voteEndTime < now)
+            if (IsVotingClosedForBreak(breakEntity, now))
             {
                 return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę dobiegło już końca.");
             }
