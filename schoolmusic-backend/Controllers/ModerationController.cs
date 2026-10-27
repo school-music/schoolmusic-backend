@@ -36,10 +36,10 @@ namespace schoolmusic_backend.Controllers
         public record SongProposalDto(
             string Id,
             int SongId,
-            string SpotifyId,
+            string? SpotifyId,
             string Title,
             string Artist,
-            string Cover,
+            string? Cover,
             int DurationMs,
             int BreakId,
             int? BreakNumber,
@@ -127,16 +127,29 @@ namespace schoolmusic_backend.Controllers
 
             RedisValue[] pendingSongs = await db.ListRangeAsync(pendingKey);
 
-            List<SongProposalDto> proposals = pendingSongs
-                .Where(rv => rv.HasValue) // element is not null
-                .Select(rv => JsonSerializer.Deserialize<SongProposalDto>(rv.ToString(), _jsonOptions))
-                .Where(dto => dto != null) // ignore empty deserialization results
-                .ToList()!;
+            List<SongProposalDto> proposals = new();
+            foreach (var rv in pendingSongs)
+            {
+                if (!rv.HasValue) continue;
+                try
+                {
+                    var dto = JsonSerializer.Deserialize<SongProposalDto>(rv.ToString(), _jsonOptions);
+                    if (dto != null)
+                    {
+                        proposals.Add(dto);
+                    }
+                }
+                catch
+                {
+                    // Ignoruj wpisy o niezgodnym formacie
+                }
+            }
 
             return Ok(new
             {
                 Message = "Wszystkie propozycje piosenek oczekujące na zatwierdzenie",
                 Songs = proposals,
+                Proposals = proposals
             });
         }
 
@@ -326,6 +339,7 @@ namespace schoolmusic_backend.Controllers
         /// <returns>Zwraca IActionResult z odpowiednim kodem HTTP i obiektem zawierającym komunikat, identyfikator propozycji,
         /// tytuł utworu oraz flagę wskazującą, czy utwór został dodany do czarnej listy.</returns>
         [HttpPost("deny/{proposalId}")]
+        [HttpPost("reject/{proposalId}")]
         public async Task<IActionResult> DenySong(string proposalId, [FromQuery] bool addToBlacklist = false)
         {
             var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
