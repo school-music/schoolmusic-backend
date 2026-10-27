@@ -181,17 +181,15 @@ Każdy Pull Request oraz push do gałęzi `main` jest automatycznie testowany pr
 
 System **SchoolMusic** umożliwia logowanie uczniów bezpośrednio ich kontami ze szkolnego katalogu komputerowego (Active Directory / OpenLDAP) z mechanizmem automatycznego tworzenia kont (**JIT provisioning**).
 
-* 🔐 **Dedykowany przewodnik dla administratora szkoły:** Szczegółowe instrukcje, parametry i kwestionariusz znajdują się w [docs/LDAP_INTEGRATION_GUIDE.md](docs/LDAP_INTEGRATION_GUIDE.md).
-* 🧪 **Lokalny serwer OpenLDAP do testów:** Możliwość uruchomienia gotowego kontenera LDAP z testowymi kontami uczniów:
-  `ash
-  docker compose -f docker-compose.yml -f docker-compose.ldap.yml up -d
-  `
+**Dedykowany przewodnik dla administratora szkoły:** Szczegółowe instrukcje, parametry i kwestionariusz znajdują się w [docs/LDAP_INTEGRATION_GUIDE.md](docs/LDAP_INTEGRATION_GUIDE.md).
+**Lokalny serwer OpenLDAP do testów:** Możliwość uruchomienia gotowego kontenera LDAP z testowymi kontami uczniów:
+  `docker compose -f docker-compose.yml -f docker-compose.ldap.yml up -d`
   Konta testowe w OpenLDAP:
   - jan.kowalski / SzkolaPassword123!
-  - nna.nowak / SzkolaPassword123!
+  - anna.nowak / SzkolaPassword123!
 
 ---
 ## Materiały konkursowe
 
-* 🎤 **Konspekt prezentacji przed komisją:** Szczegółowe omówienie 10 punktów regulaminowych (Sekcje 14 i 15) znajduje się w pliku [`docs/PREZENTACJA.md`](docs/PREZENTACJA.md).
-* 🗄️ **Schemat bazy danych demo:** Gotowy plik inicjalizacyjny SQL znajduje się w [`docs/schoolmusic.sql`](docs/schoolmusic.sql).
+**Konspekt prezentacji przed komisją:** Szczegółowe omówienie 10 punktów regulaminowych (Sekcje 14 i 15) znajduje się w pliku [`docs/PREZENTACJA.md`](docs/PREZENTACJA.md).
+**Schemat bazy danych demo:** Gotowy plik inicjalizacyjny SQL znajduje się w [`docs/schoolmusic.sql`](docs/schoolmusic.sql).
