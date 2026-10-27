@@ -36,16 +36,16 @@ namespace schoolmusic_backend.Controllers
         public record SongProposalDto(
             string Id,
             int SongId,
-            string? SpotifyId,
-            string Title,
-            string Artist,
-            string? Cover,
-            int DurationMs,
-            int BreakId,
-            int? BreakNumber,
-            int UserId,
-            string SubmittedBy,
-            DateTime SubmittedAt
+            string? SpotifyId = null,
+            string? Title = null,
+            string? Artist = null,
+            string? Cover = null,
+            int DurationMs = 0,
+            int BreakId = 1,
+            int? BreakNumber = null,
+            int UserId = 0,
+            string? SubmittedBy = null,
+            DateTime? SubmittedAt = null
         );
 
         public record BlacklistedSongItemDto(
@@ -164,7 +164,8 @@ namespace schoolmusic_backend.Controllers
         [HttpPost("approve/{proposalId}")]
         public async Task<IActionResult> ApproveSong(string proposalId)
         {
-            var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                           ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
             if (!int.TryParse(userIdClaim, out int modUserId))
             {
                 return Unauthorized(new { Message = "Brak autoryzacji moderatora." });
@@ -257,6 +258,8 @@ namespace schoolmusic_backend.Controllers
                     GreenlistId = greenlistEntry.Id,
                     ModeratorId = moderator.Id,
                     ModerationStatus = "approved",
+                    Status = "queued",
+                    CreatedAt = DateTime.UtcNow,
                     OrderIndex = currentMaxOrder + 1
                 };
                 _context.QueueItems.Add(queueItem);
@@ -312,7 +315,7 @@ namespace schoolmusic_backend.Controllers
                     cover = q.Song.Cover,
                     durationMs = q.Song.DurationMs,
                     votesCount = q.Votes.Count,
-                    submittedBy = q.User.UserLogin,
+                    submittedBy = q.User?.UserLogin ?? "Uczeń",
                     orderIndex = q.OrderIndex
                 })
                 .ToList();
@@ -342,7 +345,8 @@ namespace schoolmusic_backend.Controllers
         [HttpPost("reject/{proposalId}")]
         public async Task<IActionResult> DenySong(string proposalId, [FromQuery] bool addToBlacklist = false)
         {
-            var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                           ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
             if (!int.TryParse(userIdClaim, out int modUserId))
             {
                 return Unauthorized(new { Message = "Brak autoryzacji moderatora." });
