@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.SignalR;
+﻿using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Moq;
 using schoolmusic_backend.Hubs;
@@ -25,7 +25,18 @@ public class QueueServiceTests
         Mock<IConnectionMultiplexer>? redisConnection = null)
     {
         var context = CreateInMemoryContext(dbName);
-        redisConnection ??= new Mock<IConnectionMultiplexer>();
+        if (redisConnection == null)
+        {
+            var defaultRedis = new Mock<IConnectionMultiplexer>();
+            var defaultDb = new Mock<IDatabase>();
+            defaultDb.Setup(db => db.ListRangeAsync(It.IsAny<RedisKey>(), It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CommandFlags>()))
+                .ReturnsAsync(Array.Empty<RedisValue>());
+            defaultDb.Setup(db => db.ListRightPushAsync(It.IsAny<RedisKey>(), It.IsAny<RedisValue>(), It.IsAny<When>(), It.IsAny<CommandFlags>()))
+                .ReturnsAsync(1);
+            defaultRedis.Setup(r => r.GetDatabase(It.IsAny<int>(), It.IsAny<object>()))
+                .Returns(defaultDb.Object);
+            redisConnection = defaultRedis;
+        }
         var mockHub = new Mock<IHubContext<QueueHub>>();
         var mockClients = new Mock<IHubClients>();
         var mockClientProxy = new Mock<IClientProxy>();
@@ -275,5 +286,57 @@ public class QueueServiceTests
         Assert.Equal(new[] { 1, 3 }, await context.Histories.OrderBy(item => item.SongId)
             .Select(item => item.SongId).ToArrayAsync());
         Assert.Empty(await context.QueueItems.ToListAsync());
+    }
+
+    [Fact]
+    public async Task ProposeSongAsync_WhenTitleAndArtistProvided_CreatesSongAndProposes()
+    {
+        var (service, context) = CreateService(nameof(ProposeSongAsync_WhenTitleAndArtistProvided_CreatesSongAndProposes));
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now.AddMinutes(10), EndsAt = now.AddMinutes(20),
+            VoteEnds = now.AddMinutes(10), MusicEnabled = true
+        };
+        context.Breaks.Add(breakEntity);
+        await context.SaveChangesAsync();
+
+        var dto = new ProposeSongDto(
+            SongId: null,
+            SpotifyId: null,
+            BreakId: 1,
+            Title: "Nowy Utwór",
+            Artist: "Nowy Artysta",
+            Genre: "Pop"
+        );
+
+        var result = await service.ProposeSongAsync(dto, currentUserId: 1);
+
+        Assert.True(result.Success);
+        var createdSong = await context.Songs.Include(s => s.Artist)
+            .FirstOrDefaultAsync(s => s.Title == "Nowy Utwór");
+        Assert.NotNull(createdSong);
+        Assert.Equal("Nowy Artysta", createdSong.Artist.Name);
+    }
+
+    [Fact]
+    public async Task GetQueueForBreakAsync_WhenRequestedBreakNotFound_FallsBackToExistingBreak()
+    {
+        var (service, context) = CreateService(nameof(GetQueueForBreakAsync_WhenRequestedBreakNotFound_FallsBackToExistingBreak));
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 10, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now, EndsAt = now.AddMinutes(10), MusicEnabled = true
+        };
+        context.Breaks.Add(breakEntity);
+        await context.SaveChangesAsync();
+
+        // Żądanie dla nieistniejącej przerwy 999
+        var result = await service.GetQueueForBreakAsync(999, currentUserId: 1);
+
+        Assert.True(result.Success);
+        Assert.Equal(200, result.StatusCode);
     }
 }

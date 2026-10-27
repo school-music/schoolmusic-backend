@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.SignalR;
+﻿using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
@@ -10,7 +10,15 @@ namespace schoolmusic_backend.Services
     /// <summary>
     /// Reprezentuje żądanie zaproponowania utworu zawierające identyfikatory utworu i przerwy
     /// </summary>
-    public record ProposeSongDto(int? SongId, string? SpotifyId, int? BreakId);
+    public record ProposeSongDto(
+        int? SongId = null,
+        string? SpotifyId = null,
+        int? BreakId = null,
+        string? Title = null,
+        string? Artist = null,
+        string? Genre = null,
+        string? Mp3Url = null
+    );
 
     /// <summary>
     /// Reprezentuje żądanie oddania głosu dla elementu kolejki, opcjonalnie powiązane z utworem lub przerwą
@@ -107,7 +115,13 @@ namespace schoolmusic_backend.Services
             var breakEntity = await _context.Breaks.FindAsync(breakId);
             if (breakEntity == null)
             {
-                return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                // Fallback: jeśli podana przerwa nie istnieje, spróbuj użyć pierwszej dostępnej
+                breakEntity = await _context.Breaks.OrderBy(b => b.BreakNumber).FirstOrDefaultAsync();
+                if (breakEntity == null)
+                {
+                    return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                }
+                breakId = breakEntity.Id;
             }
 
             var items = await _context.QueueItems
@@ -182,6 +196,48 @@ namespace schoolmusic_backend.Services
                     }
 
                     song = await SpotifyTrackImporter.GetOrImportAsync(_context, _songSourceService, dto.SpotifyId);
+                }
+            }
+
+            // Fallback: wyszukanie po tytule i opcjonalnie autorze
+            if (song == null && !string.IsNullOrWhiteSpace(dto.Title))
+            {
+                var normTitle = dto.Title.Trim().ToLower();
+                var candidateQuery = _context.Songs.Include(s => s.Artist).Where(s => s.Title.ToLower() == normTitle);
+                if (!string.IsNullOrWhiteSpace(dto.Artist))
+                {
+                    var normArtist = dto.Artist.Trim().ToLower();
+                    song = await candidateQuery.FirstOrDefaultAsync(s => s.Artist != null && s.Artist.Name.ToLower() == normArtist);
+                }
+                song ??= await candidateQuery.FirstOrDefaultAsync();
+
+                // Jeśli utwór nadal nie istnieje, a podano tytuł i wykonawcę (np. zgłoszenie z panelu WWW)
+                if (song == null && !string.IsNullOrWhiteSpace(dto.Artist))
+                {
+                    var artistName = dto.Artist.Trim();
+                    var artist = await _context.Artists.FirstOrDefaultAsync(a => a.Name.ToLower() == artistName.ToLower());
+                    if (artist == null)
+                    {
+                        artist = new Artist { Name = artistName, Source = "other" };
+                        _context.Artists.Add(artist);
+                        await _context.SaveChangesAsync();
+                    }
+
+                    song = new Song
+                    {
+                        Title = dto.Title.Trim(),
+                        ArtistId = artist.Id,
+                        Artist = artist,
+                        Genre = dto.Genre ?? "Inny",
+                        DurationMs = 180000,
+                        Source = "other",
+                        SongUrl = dto.Mp3Url ?? "https://archive.org/download/sample.mp3",
+                        SpotifyId = !string.IsNullOrWhiteSpace(dto.SpotifyId) ? dto.SpotifyId : null,
+                        IsActive = true,
+                        CreatedAt = DateTime.UtcNow
+                    };
+                    _context.Songs.Add(song);
+                    await _context.SaveChangesAsync();
                 }
             }
 
@@ -562,7 +618,13 @@ namespace schoolmusic_backend.Services
             var breakEntity = await _context.Breaks.FindAsync(breakId);
             if (breakEntity == null)
             {
-                return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                // Fallback: jeśli podana przerwa nie istnieje, spróbuj użyć pierwszej dostępnej
+                breakEntity = await _context.Breaks.OrderBy(b => b.BreakNumber).FirstOrDefaultAsync();
+                if (breakEntity == null)
+                {
+                    return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                }
+                breakId = breakEntity.Id;
             }
 
             // Pobieramy wszystkie zatwierdzone pozycje z kolejki tej przerwy

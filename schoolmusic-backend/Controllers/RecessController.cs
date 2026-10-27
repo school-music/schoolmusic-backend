@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
@@ -67,6 +67,15 @@ public class RecessController : ControllerBase
             .Where(b => b.BreakDate == targetDate)
             .OrderBy(b => b.BreakNumber)
             .ToListAsync();
+
+        if (defaultBreaks.Count == 0)
+        {
+            // Fallback: jeśli brak przerw wygenerowanych na dzisiejszą datę, pobierz przerwy bazowe
+            defaultBreaks = await _context.Breaks
+                .OrderBy(b => b.BreakNumber)
+                .Take(8)
+                .ToListAsync();
+        }
 
         var breakList = defaultBreaks.Select(b =>
         {
