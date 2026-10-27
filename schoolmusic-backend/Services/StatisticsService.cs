@@ -31,6 +31,18 @@ public sealed record TopSongStatDto(int Position, int SongId, string Title, stri
 public sealed record TopArtistStatDto(int Position, int ArtistId, string ArtistName, int PlaysCount, int TotalVotes);
 
 /// <summary>
+/// Wyjątek rzucany, gdy statystyki są chwilowo niedostępne (np. awaria bazy danych).
+/// Mapowany przez kontroler na kod HTTP 503 Service Unavailable.
+/// </summary>
+public class StatisticsUnavailableException : Exception
+{
+    public StatisticsUnavailableException(string message, Exception? innerException = null)
+        : base(message, innerException)
+    {
+    }
+}
+
+/// <summary>
 /// Komplet danych dla panelu administratora: liczniki głosów, rozkład gatunków,
 /// aktywność dniowa oraz rankingi utworów i wykonawców.
 /// </summary>
@@ -40,7 +52,8 @@ public sealed record DashboardStatisticsDto(
     IReadOnlyList<GenreStatDto> Genres,
     IReadOnlyList<DailyActivityDto> DailyActivity,
     IReadOnlyList<TopSongStatDto> TopSongs,
-    IReadOnlyList<TopArtistStatDto> TopArtists
+    IReadOnlyList<TopArtistStatDto> TopArtists,
+    bool IsAvailable = true
 );
 
 /// <summary>
@@ -99,9 +112,17 @@ public sealed class StatisticsService : IStatisticsService
             return cached;
         }
 
-        var dashboard = await BuildDashboardAsync(cancellationToken);
-        await TryWriteCacheAsync(dashboard, cancellationToken);
-        return dashboard;
+        try
+        {
+            var dashboard = await BuildDashboardAsync(cancellationToken);
+            await TryWriteCacheAsync(dashboard, cancellationToken);
+            return dashboard;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not StatisticsUnavailableException)
+        {
+            _logger.LogError(ex, "Błąd podczas generowania statystyk z bazy danych.");
+            throw new StatisticsUnavailableException("Statystyki są chwilowo niedostępne z powodu problemu z bazą danych. Spróbuj ponownie za chwilę.", ex);
+        }
     }
 
     private async Task<DashboardStatisticsDto?> TryReadCacheAsync(CancellationToken cancellationToken)
@@ -142,28 +163,27 @@ public sealed class StatisticsService : IStatisticsService
         var now = _timeProvider.GetLocalNow().DateTime;
         var today = now.Date;
 
-        var totalsTask = _context.Votes.CountAsync(cancellationToken);
-        var thisWeekTask = _context.Votes.CountAsync(v => v.VotedAt >= now.AddDays(-7), cancellationToken);
-        var todayTask = _context.Votes.CountAsync(v => v.VotedAt >= today, cancellationToken);
+        var totalVotes = await _context.Votes.CountAsync(cancellationToken);
+        var thisWeekVotes = await _context.Votes.CountAsync(v => v.VotedAt >= now.AddDays(-7), cancellationToken);
+        var todayVotes = await _context.Votes.CountAsync(v => v.VotedAt >= today, cancellationToken);
 
-        var genresTask = GetGenreStatsAsync(now, cancellationToken);
-        var dailyTask = GetDailyActivityAsync(today, cancellationToken);
-        var topSongsTask = GetTopSongsAsync(now, cancellationToken);
-        var topArtistsTask = GetTopArtistsAsync(now, cancellationToken);
-
-        await Task.WhenAll(totalsTask, thisWeekTask, todayTask, genresTask, dailyTask, topSongsTask, topArtistsTask);
+        var genres = await GetGenreStatsAsync(now, cancellationToken);
+        var dailyActivity = await GetDailyActivityAsync(today, cancellationToken);
+        var topSongs = await GetTopSongsAsync(now, cancellationToken);
+        var topArtists = await GetTopArtistsAsync(now, cancellationToken);
 
         return new DashboardStatisticsDto(
             GeneratedAt: now,
             Votes: new VoteTotalsDto(
-                Total: await totalsTask,
-                ThisWeek: await thisWeekTask,
-                Today: await todayTask
+                Total: totalVotes,
+                ThisWeek: thisWeekVotes,
+                Today: todayVotes
             ),
-            Genres: await genresTask,
-            DailyActivity: await dailyTask,
-            TopSongs: await topSongsTask,
-            TopArtists: await topArtistsTask
+            Genres: genres,
+            DailyActivity: dailyActivity,
+            TopSongs: topSongs,
+            TopArtists: topArtists,
+            IsAvailable: true
         );
     }
 
