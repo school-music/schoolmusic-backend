@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
 using StackExchange.Redis;
@@ -85,17 +86,21 @@ public sealed class StatisticsService : IStatisticsService
     private readonly IConnectionMultiplexer _redis;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<StatisticsService> _logger;
+    private readonly IStatisticsRefreshCoordinator _refreshCoordinator;
+    private static readonly IStatisticsRefreshCoordinator DefaultRefreshCoordinator = new StatisticsRefreshCoordinator();
 
     public StatisticsService(
         schoolmusicContext context,
         IConnectionMultiplexer redis,
         TimeProvider timeProvider,
-        ILogger<StatisticsService> logger)
+        ILogger<StatisticsService> logger,
+        IStatisticsRefreshCoordinator? refreshCoordinator = null)
     {
         _context = context;
         _redis = redis;
         _timeProvider = timeProvider;
         _logger = logger;
+        _refreshCoordinator = refreshCoordinator ?? DefaultRefreshCoordinator;
     }
 
     /// <summary>
@@ -112,17 +117,26 @@ public sealed class StatisticsService : IStatisticsService
             return cached;
         }
 
-        try
+        return await _refreshCoordinator.ExecuteAsync(async () =>
         {
-            var dashboard = await BuildDashboardAsync(cancellationToken);
-            await TryWriteCacheAsync(dashboard, cancellationToken);
-            return dashboard;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException and not StatisticsUnavailableException)
-        {
-            _logger.LogError(ex, "Błąd podczas generowania statystyk z bazy danych.");
-            throw new StatisticsUnavailableException("Statystyki są chwilowo niedostępne z powodu problemu z bazą danych. Spróbuj ponownie za chwilę.", ex);
-        }
+            var refreshedCache = await TryReadCacheAsync(cancellationToken);
+            if (refreshedCache != null)
+                return refreshedCache;
+
+            try
+            {
+                var dashboard = await BuildDashboardAsync(cancellationToken);
+                await TryWriteCacheAsync(dashboard, cancellationToken);
+                return dashboard;
+            }
+            catch (Exception ex) when (IsDatabaseUnavailable(ex))
+            {
+                _logger.LogError(ex, "Błąd podczas generowania statystyk z bazy danych.");
+                throw new StatisticsUnavailableException(
+                    "Statystyki są chwilowo niedostępne z powodu problemu z bazą danych. Spróbuj ponownie za chwilę.",
+                    ex);
+            }
+        }, cancellationToken);
     }
 
     private async Task<DashboardStatisticsDto?> TryReadCacheAsync(CancellationToken cancellationToken)
@@ -136,11 +150,25 @@ public sealed class StatisticsService : IStatisticsService
                 return null;
             }
 
-            return JsonSerializer.Deserialize<DashboardStatisticsDto>(cachedValue.ToString(), JsonOptions);
+            var dashboard = JsonSerializer.Deserialize<DashboardStatisticsDto>(cachedValue.ToString(), JsonOptions);
+            if (dashboard == null || dashboard.Votes == null || dashboard.Genres == null ||
+                dashboard.DailyActivity == null || dashboard.TopSongs == null || dashboard.TopArtists == null)
+            {
+                await RemoveInvalidCacheAsync(db);
+                return null;
+            }
+
+            return dashboard;
         }
         catch (RedisException ex)
         {
             _logger.LogWarning(ex, "Nie udało się odczytać statystyk z cache Redis — dane zostaną policzone z bazy.");
+            return null;
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Cache statystyk Redis zawiera nieprawidłowe dane — wpis zostanie pominięty.");
+            await RemoveInvalidCacheAsync(_redis.GetDatabase());
             return null;
         }
     }
@@ -150,7 +178,11 @@ public sealed class StatisticsService : IStatisticsService
         try
         {
             var db = _redis.GetDatabase();
-            await db.StringSetAsync(CacheKey, JsonSerializer.Serialize(dashboard, JsonOptions), CacheTtl);
+            await db.StringSetAsync(
+                CacheKey,
+                JsonSerializer.Serialize(dashboard, JsonOptions),
+                (TimeSpan?)CacheTtl,
+                When.Always);
         }
         catch (RedisException ex)
         {
@@ -270,6 +302,29 @@ public sealed class StatisticsService : IStatisticsService
         }
 
         return activity;
+    }
+
+    private async Task RemoveInvalidCacheAsync(IDatabase db)
+    {
+        try
+        {
+            await db.KeyDeleteAsync(CacheKey);
+        }
+        catch (RedisException ex)
+        {
+            _logger.LogWarning(ex, "Nie udało się usunąć nieprawidłowego cache statystyk z Redis.");
+        }
+    }
+
+    private static bool IsDatabaseUnavailable(Exception exception)
+    {
+        for (Exception? current = exception; current != null; current = current.InnerException)
+        {
+            if (current is DbException or TimeoutException)
+                return true;
+        }
+
+        return false;
     }
 
     private DateTime ToUtc(DateTime schoolLocalTime) =>

@@ -387,9 +387,7 @@ public class StatisticsServiceTests
         var write = Assert.Single(database.Invocations, i => i.Method.Name == "StringSetAsync");
         Assert.Equal("statistics:dashboard", Assert.IsType<RedisKey>(write.Arguments[0]).ToString());
 
-        // Krótka postać wywołania przekazuje wygaśnięcie jako Expiration — porównujemy wartość,
-        // niezależnie od tego, który overload kompilator wybrał.
-        Assert.Equal((Expiration)TimeSpan.FromSeconds(60), Assert.IsType<Expiration>(write.Arguments[2]));
+        Assert.Equal(TimeSpan.FromSeconds(60), Assert.IsType<TimeSpan>(write.Arguments[2]));
     }
 
     [Fact]
@@ -426,6 +424,56 @@ public class StatisticsServiceTests
         Assert.DoesNotContain(database.Invocations, i => i.Method.Name == "StringSetAsync");
     }
 
+    [Theory]
+    [InlineData("{")]
+    [InlineData("{}")]
+    public async Task GetDashboardAsync_WhenCacheIsInvalid_RemovesEntryAndFallsBackToDatabase(string cachedJson)
+    {
+        var (service, _, database) = CreateService(
+            $"{nameof(GetDashboardAsync_WhenCacheIsInvalid_RemovesEntryAndFallsBackToDatabase)}_{cachedJson.Length}",
+            new RedisValue(cachedJson));
+        database.Setup(item => item.KeyDeleteAsync(
+                It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ReturnsAsync(true);
+
+        var dto = await service.GetDashboardAsync();
+
+        Assert.True(dto.IsAvailable);
+        database.Verify(item => item.KeyDeleteAsync("statistics:dashboard", CommandFlags.None), Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public async Task GetDashboardAsync_WhenManyRequestsMissCache_RefreshesCacheOnlyOnce()
+    {
+        var context = CreateInMemoryContext(nameof(GetDashboardAsync_WhenManyRequestsMissCache_RefreshesCacheOnlyOnce));
+        RedisValue cache = RedisValue.Null;
+        var database = new Mock<IDatabase>();
+        database.Setup(item => item.StringGetAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ReturnsAsync(() => cache);
+        database.Setup(item => item.StringSetAsync(
+                It.IsAny<RedisKey>(), It.IsAny<RedisValue>(), It.IsAny<TimeSpan?>(), It.IsAny<When>()))
+            .Callback<RedisKey, RedisValue, TimeSpan?, When>((_, value, _, _) => cache = value)
+            .ReturnsAsync(true);
+        var redis = new Mock<IConnectionMultiplexer>();
+        redis.Setup(item => item.GetDatabase(It.IsAny<int>(), It.IsAny<object>())).Returns(database.Object);
+        var service = new StatisticsService(
+            context,
+            redis.Object,
+            new ManualTimeProvider(Now),
+            NullLogger<StatisticsService>.Instance,
+            new StatisticsRefreshCoordinator());
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 20)
+            .Select(_ => service.GetDashboardAsync()));
+
+        Assert.All(results, result => Assert.True(result.IsAvailable));
+        database.Verify(item => item.StringSetAsync(
+            "statistics:dashboard",
+            It.IsAny<RedisValue>(),
+            It.IsAny<TimeSpan?>(),
+            When.Always), Times.Once);
+    }
+
     [Fact]
     public async Task GetDashboardAsync_WhenRedisThrows_FallsBackToDatabase()
     {
@@ -445,8 +493,7 @@ public class StatisticsServiceTests
                 It.IsAny<RedisKey>(),
                 It.IsAny<RedisValue>(),
                 It.IsAny<TimeSpan?>(),
-                It.IsAny<When>(),
-                It.IsAny<CommandFlags>()))
+                It.IsAny<When>()))
             .ThrowsAsync(new RedisConnectionException(
                 ConnectionFailureType.UnableToConnect,
                 CommandFlags.None,
@@ -477,10 +524,10 @@ public class StatisticsServiceTests
     }
 
     [Fact]
-    public async Task GetDashboardAsync_WhenDatabaseFails_ThrowsStatisticsUnavailableException_NeverRetryLoops()
+    public async Task GetDashboardAsync_WhenProgrammingStateIsInvalid_DoesNotMaskErrorAsServiceUnavailable()
     {
-        var context = CreateInMemoryContext(nameof(GetDashboardAsync_WhenDatabaseFails_ThrowsStatisticsUnavailableException_NeverRetryLoops));
-        // Dispose context immediately to simulate a failed database connection / state
+        var context = CreateInMemoryContext(nameof(GetDashboardAsync_WhenProgrammingStateIsInvalid_DoesNotMaskErrorAsServiceUnavailable));
+        // Użycie zwolnionego DbContext oznacza błąd cyklu życia aplikacji, a nie chwilową awarię bazy.
         await context.DisposeAsync();
 
         var mockRedis = new Mock<IConnectionMultiplexer>();
@@ -495,12 +542,37 @@ public class StatisticsServiceTests
             NullLogger<StatisticsService>.Instance);
 
         var startTime = DateTime.UtcNow;
-        var ex = await Assert.ThrowsAsync<StatisticsUnavailableException>(() => service.GetDashboardAsync());
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => service.GetDashboardAsync());
         var duration = DateTime.UtcNow - startTime;
 
-        Assert.Contains("Statystyki są chwilowo niedostępne", ex.Message);
-        // Verify it failed promptly and did NOT execute a retry loop
+        // Błąd powinien zostać zwrócony od razu, bez ukrywania go jako HTTP 503 i bez pętli retry.
         Assert.True(duration < TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task GetDashboardAsync_WhenDatabaseConnectionFails_ThrowsStatisticsUnavailableException()
+    {
+        var options = new DbContextOptionsBuilder<schoolmusicContext>()
+            .UseMySql(
+                "server=127.0.0.1;port=1;database=missing;user=missing;password=missing;Connection Timeout=1",
+                new MariaDbServerVersion(new Version(10, 4, 0)))
+            .Options;
+        await using var context = new schoolmusicContext(options);
+        var redis = new Mock<IConnectionMultiplexer>();
+        var database = new Mock<IDatabase>();
+        database.Setup(item => item.StringGetAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ReturnsAsync(RedisValue.Null);
+        redis.Setup(item => item.GetDatabase(It.IsAny<int>(), It.IsAny<object>())).Returns(database.Object);
+        var service = new StatisticsService(
+            context,
+            redis.Object,
+            new ManualTimeProvider(Now),
+            NullLogger<StatisticsService>.Instance,
+            new StatisticsRefreshCoordinator());
+
+        var exception = await Assert.ThrowsAsync<StatisticsUnavailableException>(() => service.GetDashboardAsync());
+
+        Assert.Contains("chwilowo niedostępne", exception.Message);
     }
 
     [Fact]

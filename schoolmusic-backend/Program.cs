@@ -174,6 +174,7 @@ var schoolTimeZone = SchoolTimeProvider.ResolveTimeZone(builder.Configuration["S
 builder.Services.AddSingleton<TimeProvider>(new SchoolTimeProvider(TimeProvider.System, schoolTimeZone));
 builder.Services.AddScoped<ISystemStatusService, SystemStatusService>();
 builder.Services.AddScoped<IStatisticsService, StatisticsService>();
+builder.Services.AddSingleton<IStatisticsRefreshCoordinator, StatisticsRefreshCoordinator>();
 builder.Services.AddSingleton<ILdapService, LdapService>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 
