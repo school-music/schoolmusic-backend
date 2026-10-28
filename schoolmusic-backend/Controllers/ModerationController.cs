@@ -26,6 +26,7 @@ namespace schoolmusic_backend.Controllers
         private readonly IHubContext<QueueHub> _hubContext;
         private readonly IQueueMutationLock _mutationLock;
         private readonly ILogger<ModerationController>? _logger;
+        private readonly TimeProvider _timeProvider;
         private static readonly IQueueMutationLock DefaultMutationLock = new QueueMutationLock();
 
         public ModerationController(
@@ -33,13 +34,15 @@ namespace schoolmusic_backend.Controllers
             IConnectionMultiplexer redis,
             IHubContext<QueueHub> hubContext,
             IQueueMutationLock? mutationLock = null,
-            ILogger<ModerationController>? logger = null)
+            ILogger<ModerationController>? logger = null,
+            TimeProvider? timeProvider = null)
         {
             _context = context;
             _redis = redis;
             _hubContext = hubContext;
             _mutationLock = mutationLock ?? DefaultMutationLock;
             _logger = logger;
+            _timeProvider = timeProvider ?? TimeProvider.System;
         }
         /// <summary>
         /// Reprezentuje propozycję utworu przesłaną przez użytkownika.
@@ -1030,7 +1033,8 @@ namespace schoolmusic_backend.Controllers
                     _context.Votes.Add(new Vote
                     {
                         UserId = proposal.UserId,
-                        QueueItemId = queueItem.Id
+                        QueueItemId = queueItem.Id,
+                        VotedAt = _timeProvider.GetUtcNow().UtcDateTime
                     });
                 }
 

@@ -404,7 +404,8 @@ namespace schoolmusic_backend.Services
                     _context.Votes.Add(new Vote
                     {
                         UserId = currentUserId,
-                        QueueItemId = queueItem.Id
+                        QueueItemId = queueItem.Id,
+                        VotedAt = _timeProvider.GetUtcNow().UtcDateTime
                     });
                     await _context.SaveChangesAsync();
 
@@ -671,7 +672,8 @@ namespace schoolmusic_backend.Services
                     _context.Votes.Add(new Vote
                     {
                         UserId = currentUserId,
-                        QueueItemId = targetQueueItemId
+                        QueueItemId = targetQueueItemId,
+                        VotedAt = _timeProvider.GetUtcNow().UtcDateTime
                     });
                     await _context.SaveChangesAsync();
 
