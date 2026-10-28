@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 using Xunit;
@@ -293,5 +294,37 @@ public class SystemStatusServiceTests
         Assert.Equal(SchoolState.AfterHours, dto.CurrentState);
         Assert.Null(dto.BreakEndsAt);
         Assert.Equal(0, dto.SecondsRemaining);
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_WithMemoryCache_CachesBreakDataAndInvalidatesSuccessfully()
+    {
+        var now = TestDate.ToDateTime(new TimeOnly(9, 45));
+        var context = CreateInMemoryContext(nameof(GetStatusAsync_WithMemoryCache_CachesBreakDataAndInvalidatesSuccessfully));
+        var clock = new ManualTimeProvider(now);
+        var memoryCache = new MemoryCache(new MemoryCacheOptions());
+        var service = new SystemStatusService(context, clock, memoryCache);
+
+        var breakEntity = CreateBreak(breakNumber: 1, start: TestDate.ToDateTime(new TimeOnly(9, 40)), end: TestDate.ToDateTime(new TimeOnly(9, 50)));
+        context.Breaks.Add(breakEntity);
+        await context.SaveChangesAsync();
+
+        var firstResult = await service.GetStatusAsync();
+        Assert.Equal(SchoolState.Break, firstResult.CurrentState);
+
+        // Remove the break from context
+        context.Breaks.Remove(breakEntity);
+        await context.SaveChangesAsync();
+
+        // Second call should return cached break
+        var secondResult = await service.GetStatusAsync();
+        Assert.Equal(SchoolState.Break, secondResult.CurrentState);
+
+        // Invalidate cache
+        service.InvalidateScheduleCache();
+
+        // Third call now reflects database change (no breaks left today -> Holiday or AfterHours)
+        var thirdResult = await service.GetStatusAsync();
+        Assert.NotEqual(SchoolState.Break, thirdResult.CurrentState);
     }
 }
