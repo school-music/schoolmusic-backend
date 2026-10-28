@@ -23,7 +23,7 @@ public sealed class BreakSchedulerServiceTests
         public Mock<ISpotifyConnectPlaybackService> Spotify { get; } = new();
         public Mock<IAudioPlayerService> AudioPlayer { get; } = new();
         public Mock<ISystemStatusService> StatusService { get; } = new();
-        public ManualTimeProvider Clock { get; } = new(DateTime.UtcNow);
+        public ManualTimeProvider Clock { get; } = new(DateTime.Now);
 
         public Fixture()
         {
@@ -314,7 +314,6 @@ public sealed class BreakSchedulerServiceTests
             .ReturnsAsync([new SpotifyQueueTrack(1, "A12345678901234567890", "Song", "Artist")]);
 
         await fixture.Tick();
-        fixture.Clock.Advance(TimeSpan.FromHours(1));
         await fixture.Tick();
 
         fixture.Spotify.Verify(service => service.StartPlaybackAsync(

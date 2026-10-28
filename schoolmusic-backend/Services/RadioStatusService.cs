@@ -15,10 +15,12 @@ namespace schoolmusic_backend.Services
     public class RadioStatusService : IRadioStatusService
     {
         private readonly schoolmusicContext _context;
+        private readonly TimeProvider _timeProvider;
 
-        public RadioStatusService(schoolmusicContext context)
+        public RadioStatusService(schoolmusicContext context, TimeProvider? timeProvider = null)
         {
             _context = context;
+            _timeProvider = timeProvider ?? TimeProvider.System;
         }
 
         /// <summary>
@@ -30,7 +32,7 @@ namespace schoolmusic_backend.Services
         /// wyjątkowych lub wyciszonych przerw obiekt może dodatkowo zawierać pole reason z opisem powodu.</returns>
         public async Task<object> GetNowPlayingAsync()
         {
-            var now = DateTime.Now;
+            var now = _timeProvider.GetLocalNow().DateTime;
             var today = DateOnly.FromDateTime(now);
 
             // Sprawdzenie dnia wyjątkowego (np. żałoba, dzień bez muzyki)
@@ -170,7 +172,7 @@ namespace schoolmusic_backend.Services
                         cover = topTrack.Song.Cover,
                         durationMs = topTrack.Song.DurationMs,
                         votesCount = topTrack.Votes.Count,
-                        submittedBy = topTrack.User.UserLogin
+                        submittedBy = topTrack.User?.UserLogin ?? "Uczeń"
                     },
                     breakInfo = new
                     {

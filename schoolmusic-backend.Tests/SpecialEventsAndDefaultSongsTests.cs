@@ -197,6 +197,24 @@ public class SpecialEventsAndDefaultSongsTests
         Assert.IsType<NotFoundObjectResult>(result);
     }
 
+    [Fact]
+    public async Task SpecialEvents_Create_ConvertsUtcInputToSchoolLocalTime()
+    {
+        var context = CreateInMemoryContext(Guid.NewGuid().ToString());
+        var clock = new SchoolTimeProvider(
+            new ManualTimeProvider(new DateTime(2026, 10, 17, 6, 0, 0)),
+            SchoolTimeProvider.ResolveTimeZone("Europe/Warsaw"));
+        var controller = new AdminSpecialEventsController(context, timeProvider: clock);
+
+        await controller.CreateSpecialEvent(new CreateSpecialEventDto(
+            "Dzwonek",
+            "bell.mp3",
+            new DateTime(2026, 10, 17, 6, 0, 0, DateTimeKind.Utc)));
+
+        var saved = await context.SpecialEvents.SingleAsync();
+        Assert.Equal(new DateTime(2026, 10, 17, 8, 0, 0), saved.StartsAt);
+    }
+
     #endregion
 
     #region AdminDefaultSongsController Tests

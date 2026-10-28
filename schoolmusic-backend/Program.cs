@@ -170,7 +170,8 @@ builder.Services.AddSingleton<IBreakSchedulerService>(sp => sp.GetRequiredServic
 if (builder.Configuration.GetValue("Scheduler:Enabled", true))
     builder.Services.AddHostedService(sp => sp.GetRequiredService<BreakSchedulerService>());
 builder.Services.AddSingleton<ISongSourceService, SpotifySongSource>();
-builder.Services.AddSingleton(TimeProvider.System);
+var schoolTimeZone = SchoolTimeProvider.ResolveTimeZone(builder.Configuration["School:TimeZone"]);
+builder.Services.AddSingleton<TimeProvider>(new SchoolTimeProvider(TimeProvider.System, schoolTimeZone));
 builder.Services.AddScoped<ISystemStatusService, SystemStatusService>();
 builder.Services.AddScoped<IStatisticsService, StatisticsService>();
 builder.Services.AddSingleton<ILdapService, LdapService>();

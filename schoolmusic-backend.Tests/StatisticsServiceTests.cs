@@ -37,7 +37,8 @@ public class StatisticsServiceTests
 
     private static (StatisticsService service, schoolmusicContext context, Mock<IDatabase> database) CreateService(
         string dbName,
-        RedisValue? cachedValue = null)
+        RedisValue? cachedValue = null,
+        TimeProvider? timeProvider = null)
     {
         var context = CreateInMemoryContext(dbName);
         var mockDatabase = CreateMockDatabase(cachedValue);
@@ -45,7 +46,7 @@ public class StatisticsServiceTests
         var mockRedis = new Mock<IConnectionMultiplexer>();
         mockRedis.Setup(r => r.GetDatabase(It.IsAny<int>(), It.IsAny<object>())).Returns(mockDatabase.Object);
 
-        var clock = new ManualTimeProvider(Now);
+        var clock = timeProvider ?? new ManualTimeProvider(Now);
         var service = new StatisticsService(context, mockRedis.Object, clock, NullLogger<StatisticsService>.Instance);
 
         return (service, context, mockDatabase);
@@ -144,6 +145,28 @@ public class StatisticsServiceTests
         Assert.Equal(3, dto.Votes.Total);
         Assert.Equal(2, dto.Votes.ThisWeek);
         Assert.Equal(1, dto.Votes.Today);
+    }
+
+    [Fact]
+    public async Task GetDashboardAsync_CountsTodayUsingSchoolTimeZoneBoundary()
+    {
+        var utcClock = new ManualTimeProvider(new DateTime(2026, 10, 14, 22, 30, 0));
+        var schoolClock = new SchoolTimeProvider(
+            utcClock,
+            SchoolTimeProvider.ResolveTimeZone("Europe/Warsaw"));
+        var (service, context, _) = CreateService(
+            nameof(GetDashboardAsync_CountsTodayUsingSchoolTimeZoneBoundary),
+            timeProvider: schoolClock);
+        context.Votes.AddRange(
+            new Vote { Id = 1, UserId = 1, QueueItemId = 1, VotedAt = new DateTime(2026, 10, 14, 22, 15, 0) },
+            new Vote { Id = 2, UserId = 2, QueueItemId = 1, VotedAt = new DateTime(2026, 10, 14, 21, 59, 0) });
+        await context.SaveChangesAsync();
+
+        var dto = await service.GetDashboardAsync();
+
+        Assert.Equal(1, dto.Votes.Today);
+        Assert.Equal(new DateOnly(2026, 10, 15), dto.DailyActivity[^1].Date);
+        Assert.Equal(1, dto.DailyActivity[^1].VotesCount);
     }
 
     [Fact]

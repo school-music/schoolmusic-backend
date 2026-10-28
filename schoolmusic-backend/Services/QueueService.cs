@@ -52,6 +52,7 @@ namespace schoolmusic_backend.Services
         private readonly ISongSourceService _songSourceService;
         private readonly IConfiguration? _configuration;
         private readonly IQueueMutationLock _mutationLock;
+        private readonly TimeProvider _timeProvider;
 
         public QueueService(
             schoolmusicContext context,
@@ -59,7 +60,8 @@ namespace schoolmusic_backend.Services
             IHubContext<QueueHub> hubContext,
             ISongSourceService songSourceService,
             IConfiguration? configuration = null,
-            IQueueMutationLock? mutationLock = null)
+            IQueueMutationLock? mutationLock = null,
+            TimeProvider? timeProvider = null)
         {
             _context = context;
             _redis = redis;
@@ -67,6 +69,7 @@ namespace schoolmusic_backend.Services
             _songSourceService = songSourceService;
             _configuration = configuration;
             _mutationLock = mutationLock ?? DefaultMutationLock;
+            _timeProvider = timeProvider ?? TimeProvider.System;
         }
 
         /// <summary>
@@ -132,7 +135,7 @@ namespace schoolmusic_backend.Services
                     cover = q.Song.Cover,
                     durationMs = q.Song.DurationMs,
                     votesCount = q.Votes.Count,
-                    submittedBy = q.User.UserLogin,
+                    submittedBy = q.User?.UserLogin ?? "Uczeń",
                     orderIndex = q.OrderIndex
                 })
                 .ToList();
@@ -189,7 +192,7 @@ namespace schoolmusic_backend.Services
                     durationMs = q.Song.DurationMs,
                     votesCount = q.Votes.Count,
                     hasVoted = currentUserId.HasValue && q.Votes.Any(v => v.UserId == currentUserId.Value),
-                    submittedBy = q.User.UserLogin,
+                    submittedBy = q.User?.UserLogin ?? "Uczeń",
                     orderIndex = q.OrderIndex
                 })
                 .ToList();
@@ -277,7 +280,7 @@ namespace schoolmusic_backend.Services
                         SongUrl = dto.Mp3Url ?? "https://archive.org/download/sample.mp3",
                         SpotifyId = !string.IsNullOrWhiteSpace(dto.SpotifyId) ? dto.SpotifyId : null,
                         IsActive = true,
-                        CreatedAt = DateTime.UtcNow
+                        CreatedAt = _timeProvider.GetUtcNow().UtcDateTime
                     };
                     _context.Songs.Add(song);
                     await _context.SaveChangesAsync();
@@ -304,16 +307,17 @@ namespace schoolmusic_backend.Services
                 .OrderByDescending(h => h.PlayedAt)
                 .FirstOrDefaultAsync();
 
-            if (lastPlayed != null && lastPlayed.PlayedAt > DateTime.UtcNow.AddHours(-SongCooldownHours))
+            var utcNow = _timeProvider.GetUtcNow().UtcDateTime;
+            if (lastPlayed != null && lastPlayed.PlayedAt > utcNow.AddHours(-SongCooldownHours))
             {
-                var remaining = lastPlayed.PlayedAt.AddHours(SongCooldownHours) - DateTime.UtcNow;
+                var remaining = lastPlayed.PlayedAt.AddHours(SongCooldownHours) - utcNow;
                 var hours = Math.Max(1, (int)Math.Ceiling(remaining.TotalHours));
                 return ServiceResult<object>.BadRequest($"Ten utwór był niedawno odtwarzany na radiowęźle ({lastPlayed.PlayedAt:dd.MM HH:mm}). Będzie dostępny do ponownego zgłoszenia za ok. {hours} godz.");
             }
 
             // Ustalenie przerwy docelowej
             int targetBreakId;
-            var now = DateTime.Now;
+            var now = _timeProvider.GetLocalNow().DateTime;
             var today = DateOnly.FromDateTime(now);
 
             if (dto.BreakId.HasValue)
@@ -459,7 +463,7 @@ namespace schoolmusic_backend.Services
                 breakNumber = targetBreakEntity.BreakNumber,
                 userId = currentUserId,
                 submittedBy = userEntity?.UserLogin ?? "Uczeń",
-                submittedAt = DateTime.UtcNow
+                submittedAt = _timeProvider.GetUtcNow().UtcDateTime
             };
 
             var deduplicationKey = PendingProposalStore.GetDeduplicationKey(targetBreakId, song.Id);
@@ -552,7 +556,7 @@ namespace schoolmusic_backend.Services
                     if (breakEntity == null)
                         return ServiceResult<object>.NotFound("Przerwa docelowa nie istnieje.");
 
-                    if (IsVotingClosedForBreak(breakEntity, DateTime.Now))
+                    if (IsVotingClosedForBreak(breakEntity, _timeProvider.GetLocalNow().DateTime))
                         return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę dobiegło już końca.");
 
                     QueueItem? targetQueueItem;
@@ -581,9 +585,10 @@ namespace schoolmusic_backend.Services
                                 .OrderByDescending(h => h.PlayedAt)
                                 .FirstOrDefaultAsync();
 
-                            if (lastPlayed != null && lastPlayed.PlayedAt > DateTime.UtcNow.AddHours(-SongCooldownHours))
+                            var utcNow = _timeProvider.GetUtcNow().UtcDateTime;
+                            if (lastPlayed != null && lastPlayed.PlayedAt > utcNow.AddHours(-SongCooldownHours))
                             {
-                                var remaining = lastPlayed.PlayedAt.AddHours(SongCooldownHours) - DateTime.UtcNow;
+                                var remaining = lastPlayed.PlayedAt.AddHours(SongCooldownHours) - utcNow;
                                 var hours = Math.Max(1, (int)Math.Ceiling(remaining.TotalHours));
                                 return ServiceResult<object>.BadRequest($"Ten utwór był niedawno odtwarzany na radiowęźle ({lastPlayed.PlayedAt:dd.MM HH:mm}). Będzie dostępny za ok. {hours} godz.");
                             }
@@ -674,7 +679,8 @@ namespace schoolmusic_backend.Services
                     .FirstOrDefaultAsync(v => v.UserId == currentUserId && v.QueueItemId == queueItemId);
                 if (vote == null)
                     return ServiceResult<object>.NotFound("Nie oddałeś głosu na ten utwór lub został on już cofnięty.");
-                if (vote.QueueItem.Status != QueueItemStatuses.Queued || IsVotingClosedForBreak(vote.QueueItem.Break, DateTime.Now))
+                if (vote.QueueItem.Status != QueueItemStatuses.Queued ||
+                    IsVotingClosedForBreak(vote.QueueItem.Break, _timeProvider.GetLocalNow().DateTime))
                     return ServiceResult<object>.BadRequest("Nie można cofnąć głosu po zamknięciu głosowania lub rozpoczęciu odtwarzania utworu.");
 
                 _context.Votes.Remove(vote);
@@ -729,7 +735,7 @@ namespace schoolmusic_backend.Services
                     .ToList();
 
                 // Status kolejki jest aktualizowany przez odpytywanie Spotify; archiwizujemy tylko rozpoczęte utwory.
-                var now = DateTime.UtcNow;
+                var now = _timeProvider.GetUtcNow().UtcDateTime;
                 foreach (var played in playedItems)
                 {
                     _context.Histories.Add(new History

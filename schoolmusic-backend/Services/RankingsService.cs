@@ -44,26 +44,33 @@ namespace schoolmusic_backend.Services
     public class RankingsService : IRankingsService
     {
         private readonly schoolmusicContext _context;
+        private readonly TimeProvider _timeProvider;
 
-        public RankingsService(schoolmusicContext context)
+        public RankingsService(schoolmusicContext context, TimeProvider? timeProvider = null)
         {
             _context = context;
+            _timeProvider = timeProvider ?? TimeProvider.System;
         }
 
         /// <summary>
         ///Zwraca datę początkową odpowiadającą zadanej przerwie lub null dla całkowitego zakresu.
         /// </summary>
         /// <returns>Data początkowa w UTC odpowiadająca przerwie lub null dla 'all-time'/'all'.</returns>
-        private static DateTime? GetStartDateForPeriod(string? period)
+        private DateTime? GetStartDateForPeriod(string? period)
         {
+            var utcNow = _timeProvider.GetUtcNow().UtcDateTime;
+            var localToday = _timeProvider.GetLocalNow().Date;
+            var todayStartUtc = TimeZoneInfo.ConvertTimeToUtc(
+                DateTime.SpecifyKind(localToday, DateTimeKind.Unspecified),
+                _timeProvider.LocalTimeZone);
             return period?.Trim().ToLowerInvariant() switch
             {
-                "today" or "day" => DateTime.UtcNow.Date,
-                "week" => DateTime.UtcNow.AddDays(-7),
-                "month" => DateTime.UtcNow.AddDays(-30),
-                "year" => DateTime.UtcNow.AddDays(-365),
+                "today" or "day" => todayStartUtc,
+                "week" => utcNow.AddDays(-7),
+                "month" => utcNow.AddDays(-30),
+                "year" => utcNow.AddDays(-365),
                 "all-time" or "all" => null,
-                _ => DateTime.UtcNow.AddDays(-7) // domyślnie ostatnie 7 dni
+                _ => utcNow.AddDays(-7) // domyślnie ostatnie 7 dni
             };
         }
 
@@ -115,7 +122,7 @@ namespace schoolmusic_backend.Services
                         SongId: song.Id,
                         Title: song.Title,
                         ArtistName: song.Artist?.Name ?? "Nieznany wykonawca",
-                        Cover: song.Cover,
+                        Cover: song.Cover ?? "",
                         DurationMs: song.DurationMs,
                         PlaysCount: x.PlaysCount,
                         TotalVotes: x.TotalVotes
@@ -202,8 +209,8 @@ namespace schoolmusic_backend.Services
                     h.Id,
                     h.SongId,
                     h.Song.Title,
-                    h.Song.Artist.Name ?? "Nieznany wykonawca",
-                    h.Song.Cover,
+                    h.Song.Artist!.Name ?? "Nieznany wykonawca",
+                    h.Song.Cover ?? "",
                     h.PlayedAt,
                     h.BreakId,
                     h.Break.BreakNumber,

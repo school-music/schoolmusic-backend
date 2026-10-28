@@ -13,15 +13,18 @@ public class RecessController : ControllerBase
     private readonly schoolmusicContext _context;
     private readonly IBreakSchedulerService? _scheduler;
     private readonly ISystemStatusService? _statusService;
+    private readonly TimeProvider _timeProvider;
 
     public RecessController(
         schoolmusicContext context,
         IBreakSchedulerService? scheduler = null,
-        ISystemStatusService? statusService = null)
+        ISystemStatusService? statusService = null,
+        TimeProvider? timeProvider = null)
     {
         _context = context;
         _scheduler = scheduler;
         _statusService = statusService;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     private void NotifyScheduleUpdated()
@@ -63,7 +66,7 @@ public class RecessController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> GetBreaks([FromQuery] DateOnly? date)
     {
-        var targetDate = date ?? DateOnly.FromDateTime(DateTime.Today);
+        var targetDate = date ?? DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
 
         // check if its exception date
         var exceptionDay = await _context.ExceptionDays
@@ -140,7 +143,7 @@ public class RecessController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> GetCurrentStatus()
     {
-        var now = DateTime.Now;
+        var now = _timeProvider.GetLocalNow().DateTime;
         var today = DateOnly.FromDateTime(now);
 
         // check if today is exception day

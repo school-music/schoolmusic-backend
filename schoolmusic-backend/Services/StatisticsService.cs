@@ -160,20 +160,22 @@ public sealed class StatisticsService : IStatisticsService
 
     private async Task<DashboardStatisticsDto> BuildDashboardAsync(CancellationToken cancellationToken)
     {
-        var now = _timeProvider.GetLocalNow().DateTime;
-        var today = now.Date;
+        var utcNow = _timeProvider.GetUtcNow().UtcDateTime;
+        var localNow = _timeProvider.GetLocalNow().DateTime;
+        var today = localNow.Date;
+        var todayStartUtc = ToUtc(today);
 
         var totalVotes = await _context.Votes.CountAsync(cancellationToken);
-        var thisWeekVotes = await _context.Votes.CountAsync(v => v.VotedAt >= now.AddDays(-7), cancellationToken);
-        var todayVotes = await _context.Votes.CountAsync(v => v.VotedAt >= today, cancellationToken);
+        var thisWeekVotes = await _context.Votes.CountAsync(v => v.VotedAt >= utcNow.AddDays(-7), cancellationToken);
+        var todayVotes = await _context.Votes.CountAsync(v => v.VotedAt >= todayStartUtc, cancellationToken);
 
-        var genres = await GetGenreStatsAsync(now, cancellationToken);
+        var genres = await GetGenreStatsAsync(utcNow, cancellationToken);
         var dailyActivity = await GetDailyActivityAsync(today, cancellationToken);
-        var topSongs = await GetTopSongsAsync(now, cancellationToken);
-        var topArtists = await GetTopArtistsAsync(now, cancellationToken);
+        var topSongs = await GetTopSongsAsync(utcNow, cancellationToken);
+        var topArtists = await GetTopArtistsAsync(utcNow, cancellationToken);
 
         return new DashboardStatisticsDto(
-            GeneratedAt: now,
+            GeneratedAt: localNow,
             Votes: new VoteTotalsDto(
                 Total: totalVotes,
                 ThisWeek: thisWeekVotes,
@@ -236,24 +238,27 @@ public sealed class StatisticsService : IStatisticsService
     /// </summary>
     private async Task<IReadOnlyList<DailyActivityDto>> GetDailyActivityAsync(DateTime today, CancellationToken cancellationToken)
     {
-        var windowStart = today.AddDays(-(DailyActivityDays - 1));
+        var windowStartLocal = today.AddDays(-(DailyActivityDays - 1));
+        var windowStartUtc = ToUtc(windowStartLocal);
 
-        var votesPerDay = await _context.Votes
+        var voteTimes = await _context.Votes
             .AsNoTracking()
-            .Where(v => v.VotedAt >= windowStart)
-            .GroupBy(v => v.VotedAt.Date)
-            .Select(g => new { Date = g.Key, Count = g.Count() })
+            .Where(v => v.VotedAt >= windowStartUtc)
+            .Select(v => v.VotedAt)
             .ToListAsync(cancellationToken);
 
-        var playsPerDay = await _context.Histories
+        var playTimes = await _context.Histories
             .AsNoTracking()
-            .Where(h => h.PlayedAt >= windowStart)
-            .GroupBy(h => h.PlayedAt.Date)
-            .Select(g => new { Date = g.Key, Count = g.Count() })
+            .Where(h => h.PlayedAt >= windowStartUtc)
+            .Select(h => h.PlayedAt)
             .ToListAsync(cancellationToken);
 
-        var votesLookup = votesPerDay.ToDictionary(x => x.Date, x => x.Count);
-        var playsLookup = playsPerDay.ToDictionary(x => x.Date, x => x.Count);
+        var votesLookup = voteTimes
+            .GroupBy(ToSchoolDate)
+            .ToDictionary(group => group.Key, group => group.Count());
+        var playsLookup = playTimes
+            .GroupBy(ToSchoolDate)
+            .ToDictionary(group => group.Key, group => group.Count());
 
         var activity = new List<DailyActivityDto>(DailyActivityDays);
         for (int offset = DailyActivityDays - 1; offset >= 0; offset--)
@@ -266,6 +271,16 @@ public sealed class StatisticsService : IStatisticsService
 
         return activity;
     }
+
+    private DateTime ToUtc(DateTime schoolLocalTime) =>
+        TimeZoneInfo.ConvertTimeToUtc(
+            DateTime.SpecifyKind(schoolLocalTime, DateTimeKind.Unspecified),
+            _timeProvider.LocalTimeZone);
+
+    private DateTime ToSchoolDate(DateTime utcTime) =>
+        TimeZoneInfo.ConvertTimeFromUtc(
+            DateTime.SpecifyKind(utcTime, DateTimeKind.Utc),
+            _timeProvider.LocalTimeZone).Date;
 
     /// <summary>
     /// Zwraca 10 najczęściej odtwarzanych utworów z ostatnich 30 dni.

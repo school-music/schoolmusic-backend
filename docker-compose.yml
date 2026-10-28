@@ -8,6 +8,7 @@ services:
       MARIADB_DATABASE: schoolmusic
       MARIADB_USER: ${DB_USER:-schoolmusic}
       MARIADB_PASSWORD: ${DB_PASSWORD:?Ustaw DB_PASSWORD w pliku .env}
+      TZ: UTC
     volumes:
       - mariadb_data:/var/lib/mysql
       - ./docs/schoolmusic.sql:/docker-entrypoint-initdb.d/01_init.sql
@@ -43,6 +44,7 @@ services:
       Features__SwaggerEnabled: "false"
       Auth__AllowLocalRegistration: "false"
       Scheduler__Enabled: "true"
+      School__TimeZone: Europe/Warsaw
       ConnectionString__database: "server=db;port=3306;database=schoolmusic;user=${DB_USER:-schoolmusic};password=${DB_PASSWORD:?Ustaw DB_PASSWORD w pliku .env};"
       ConnectionString__redis: "redis:6379,password=${REDIS_PASSWORD:?Ustaw REDIS_PASSWORD w pliku .env}"
       Jwt__Issuer: SchoolMusicAPI

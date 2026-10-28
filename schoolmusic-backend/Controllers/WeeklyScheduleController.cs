@@ -82,6 +82,7 @@ namespace schoolmusic_backend.Controllers
         private readonly schoolmusicContext _context;
         private readonly IBreakSchedulerService? _scheduler;
         private readonly ISystemStatusService? _statusService;
+        private readonly TimeProvider _timeProvider;
 
         private static readonly Dictionary<sbyte, string> DayNames = new()
         {
@@ -97,11 +98,13 @@ namespace schoolmusic_backend.Controllers
         public WeeklyScheduleController(
             schoolmusicContext context,
             IBreakSchedulerService? scheduler = null,
-            ISystemStatusService? statusService = null)
+            ISystemStatusService? statusService = null,
+            TimeProvider? timeProvider = null)
         {
             _context = context;
             _scheduler = scheduler;
             _statusService = statusService;
+            _timeProvider = timeProvider ?? TimeProvider.System;
         }
 
         private void NotifyScheduleUpdated()
@@ -280,7 +283,7 @@ namespace schoolmusic_backend.Controllers
             [FromQuery] DateOnly? from = null,
             [FromQuery] DateOnly? to = null)
         {
-            var startDate = from ?? DateOnly.FromDateTime(DateTime.Today);
+            var startDate = from ?? DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
             var endDate = to ?? (from.HasValue ? from.Value.AddDays(30) : startDate.AddDays(30));
 
             if (startDate > endDate)

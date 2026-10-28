@@ -62,17 +62,20 @@ public class TracksController : ControllerBase
     private readonly IBreakService _breakService;
     private readonly IAudioPlayerService _audioPlayerService;
     private readonly ISongSourceService _songSourceService;
+    private readonly TimeProvider _timeProvider;
 
     public TracksController(
         schoolmusicContext context,
         IBreakService breakService,
         IAudioPlayerService audioPlayerService,
-        ISongSourceService songSourceService)
+        ISongSourceService songSourceService,
+        TimeProvider? timeProvider = null)
     {
         _context = context;
         _breakService = breakService;
         _audioPlayerService = audioPlayerService;
         _songSourceService = songSourceService;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -349,7 +352,7 @@ public class TracksController : ControllerBase
             return exists ? requestedBreakId.Value : null;
         }
 
-        var now = DateTime.Now;
+        var now = _timeProvider.GetLocalNow().DateTime;
         var today = DateOnly.FromDateTime(now);
         var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
         if (allBreaks.Count == 0) return null;

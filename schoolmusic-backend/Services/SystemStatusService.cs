@@ -230,7 +230,7 @@ public sealed class SystemStatusService : ISystemStatusService
             (musicEnabled, muteReason) = await ResolveMusicEnabledAsync(today, weekday, currentBreak.Entity, cancellationToken);
         }
 
-        var nowPlaying = await GetNowPlayingAsync(now, cancellationToken);
+        var nowPlaying = await GetNowPlayingAsync(_timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
 
         int? targetBreakId = currentBreak?.Entity.Id
             ?? nextBreak?.Entity.Id
@@ -287,14 +287,14 @@ public sealed class SystemStatusService : ISystemStatusService
         return (breakEntity.MusicEnabled, breakEntity.MusicEnabled ? null : "Muzyka wyłączona w konfiguracji przerwy");
     }
 
-    private async Task<NowPlayingDto?> GetNowPlayingAsync(DateTime now, CancellationToken cancellationToken)
+    private async Task<NowPlayingDto?> GetNowPlayingAsync(DateTime utcNow, CancellationToken cancellationToken)
     {
         var playbackState = await _context.PlaybackStates
             .AsNoTracking()
-            .Include(p => p.CurrentQueueItem)
+            .Include(p => p.CurrentQueueItem!)
                 .ThenInclude(q => q.Song)
                     .ThenInclude(s => s.Artist)
-            .Include(p => p.CurrentQueueItem)
+            .Include(p => p.CurrentQueueItem!)
                 .ThenInclude(q => q.Votes)
             .FirstOrDefaultAsync(p => p.Id == 1, cancellationToken);
 
@@ -306,7 +306,7 @@ public sealed class SystemStatusService : ISystemStatusService
 
         var startedAt = playbackState.StartedAt;
         int elapsedSeconds = startedAt.HasValue
-            ? Math.Max(0, (int)(now - startedAt.Value).TotalSeconds)
+            ? Math.Max(0, (int)(utcNow - startedAt.Value).TotalSeconds)
             : 0;
 
         int durationSeconds = Math.Max(0, item.Song.DurationMs / 1000);

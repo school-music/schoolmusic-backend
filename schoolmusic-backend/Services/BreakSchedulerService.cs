@@ -182,7 +182,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
         var breakService = scope.ServiceProvider.GetRequiredService<IBreakService>();
         var queueService = scope.ServiceProvider.GetRequiredService<IQueueService>();
-        var now = DateTime.Now;
+        var now = _timeProvider.GetLocalNow().DateTime;
         var today = DateOnly.FromDateTime(now);
         var weekday = (sbyte)now.DayOfWeek;
         if (weekday == 0) weekday = 7;
@@ -572,9 +572,9 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             db.PlaybackStates.Add(playbackState);
         }
         playbackState.CurrentQueueItemId = current.QueueItemId;
-        playbackState.StartedAt = DateTime.Now.AddMilliseconds(-snapshot.ProgressMs);
+        playbackState.StartedAt = _timeProvider.GetUtcNow().UtcDateTime.AddMilliseconds(-snapshot.ProgressMs);
         playbackState.IsPaused = snapshot.IsPaused;
-        playbackState.UpdatedAt = DateTime.Now;
+        playbackState.UpdatedAt = _timeProvider.GetUtcNow().UtcDateTime;
         await db.SaveChangesAsync(cancellationToken);
         _lastPlayingTrackIndex = currentIndex;
 
@@ -660,7 +660,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             playback.CurrentQueueItemId = null;
             playback.StartedAt = null;
             playback.IsPaused = false;
-            playback.UpdatedAt = DateTime.Now;
+            playback.UpdatedAt = _timeProvider.GetUtcNow().UtcDateTime;
             await db.SaveChangesAsync(cancellationToken);
         }
 
@@ -727,7 +727,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             playback.CurrentQueueItemId = null;
             playback.StartedAt = null;
             playback.IsPaused = false;
-            playback.UpdatedAt = now;
+            playback.UpdatedAt = _timeProvider.GetUtcNow().UtcDateTime;
         }
 
         if (db.ChangeTracker.HasChanges())

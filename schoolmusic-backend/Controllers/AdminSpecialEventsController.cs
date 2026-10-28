@@ -38,14 +38,17 @@ namespace schoolmusic_backend.Controllers
     {
         private readonly schoolmusicContext _context;
         private readonly IBreakSchedulerService? _scheduler;
+        private readonly TimeProvider _timeProvider;
         private static readonly string[] ValidStatuses = { "pending", "playing", "done" };
 
         public AdminSpecialEventsController(
             schoolmusicContext context,
-            IBreakSchedulerService? scheduler = null)
+            IBreakSchedulerService? scheduler = null,
+            TimeProvider? timeProvider = null)
         {
             _context = context;
             _scheduler = scheduler;
+            _timeProvider = timeProvider ?? TimeProvider.System;
         }
 
         /// <summary>
@@ -121,7 +124,7 @@ namespace schoolmusic_backend.Controllers
             {
                 Title = string.IsNullOrWhiteSpace(dto.Title) ? null : dto.Title.Trim(),
                 FileUrl = dto.FileUrl.Trim(),
-                StartsAt = dto.StartsAt,
+                StartsAt = ToSchoolLocalTime(dto.StartsAt),
                 EventStatus = status
             };
 
@@ -165,7 +168,7 @@ namespace schoolmusic_backend.Controllers
 
             ev.Title = string.IsNullOrWhiteSpace(dto.Title) ? null : dto.Title.Trim();
             ev.FileUrl = dto.FileUrl.Trim();
-            ev.StartsAt = dto.StartsAt;
+            ev.StartsAt = ToSchoolLocalTime(dto.StartsAt);
             ev.EventStatus = status;
 
             await _context.SaveChangesAsync();
@@ -197,6 +200,16 @@ namespace schoolmusic_backend.Controllers
             _scheduler?.NotifyScheduleChanged();
 
             return Ok(new { Message = "Pomyślnie usunięto wydarzenie specjalne.", Id = id });
+        }
+
+        private DateTime ToSchoolLocalTime(DateTime value)
+        {
+            if (value.Kind == DateTimeKind.Unspecified)
+                return value;
+            if (value.Kind == DateTimeKind.Utc)
+                return TimeZoneInfo.ConvertTimeFromUtc(value, _timeProvider.LocalTimeZone);
+
+            return TimeZoneInfo.ConvertTime(new DateTimeOffset(value), _timeProvider.LocalTimeZone).DateTime;
         }
     }
 }
