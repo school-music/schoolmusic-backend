@@ -21,17 +21,20 @@ public class UsersController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly ILdapService _ldapService;
     private readonly IJwtTokenService _jwtTokenService;
+    private readonly ILogger<UsersController>? _logger;
 
     public UsersController(
         schoolmusicContext context,
         IConfiguration configuration,
         ILdapService ldapService,
-        IJwtTokenService jwtTokenService)
+        IJwtTokenService jwtTokenService,
+        ILogger<UsersController>? logger = null)
     {
         _context = context;
         _configuration = configuration;
         _ldapService = ldapService;
         _jwtTokenService = jwtTokenService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -117,12 +120,14 @@ public class UsersController : ControllerBase
 
             if (!isPasswordCorrect)
             {
+                _logger?.LogWarning("Odrzucono próbę logowania lokalnego z powodu nieprawidłowych danych uwierzytelniających.");
                 return BadRequest(new { Message = "Błędne hasło" });
             }
 
             var isBanned = await _context.BannedUsers.AnyAsync(b => b.UserId == existingUser.Id);
             if (isBanned)
             {
+                _logger?.LogWarning("Odrzucono logowanie zablokowanego użytkownika {UserId}.", existingUser.Id);
                 return StatusCode(StatusCodes.Status403Forbidden, new { Message = "Twoje konto zostało zablokowane przez moderatora." });
             }
 
@@ -166,6 +171,7 @@ public class UsersController : ControllerBase
             }
         }
 
+        _logger?.LogWarning("Odrzucono próbę logowania z powodu nieprawidłowych danych uwierzytelniających.");
         return Problem(
             detail: "Błędne hasło i/lub login",
             statusCode: StatusCodes.Status401Unauthorized,
@@ -200,6 +206,7 @@ public class UsersController : ControllerBase
         var ldapResult = await _ldapService.AuthenticateAsync(dto.login, dto.password);
         if (!ldapResult.Success || ldapResult.User == null)
         {
+            _logger?.LogWarning("Odrzucono próbę logowania przez szkolny katalog LDAP.");
             return Unauthorized(new
             {
                 Message = ldapResult.ErrorMessage ?? "Niepoprawny login lub hasło konta szkolnego."
@@ -215,6 +222,7 @@ public class UsersController : ControllerBase
             var isBanned = await _context.BannedUsers.AnyAsync(b => b.UserId == existingUser.Id);
             if (isBanned)
             {
+                _logger?.LogWarning("Odrzucono logowanie LDAP zablokowanego użytkownika {UserId}.", existingUser.Id);
                 return StatusCode(StatusCodes.Status403Forbidden, new { Message = "Twoje konto szkolne zostało zablokowane przez moderatora." });
             }
 
@@ -262,6 +270,7 @@ public class UsersController : ControllerBase
     {
         if (!_configuration.GetValue<bool>("Auth:AllowLocalRegistration"))
         {
+            _logger?.LogWarning("Odrzucono próbę publicznej rejestracji, ponieważ funkcja jest wyłączona.");
             return StatusCode(StatusCodes.Status403Forbidden, new
             {
                 Message = "Publiczna rejestracja kont lokalnych jest wyłączona. Użyj szkolnego konta LDAP."
@@ -305,6 +314,7 @@ public class UsersController : ControllerBase
 
         _context.Users.Add(newUser);
         await _context.SaveChangesAsync();
+        _logger?.LogInformation("Utworzono lokalne konto użytkownika {UserId}.", newUser.Id);
 
         return CreatedAtAction(nameof(Register), new
         {
@@ -345,6 +355,7 @@ public class UsersController : ControllerBase
             });
         }
         await _context.SaveChangesAsync();
+        _logger?.LogInformation("Usunięto konto użytkownika {UserId}.", currentUserId);
 
         return NoContent();
     }
@@ -352,6 +363,11 @@ public class UsersController : ControllerBase
     private IActionResult GenerateLoginResponse(User user, string message, bool isLdap = false)
     {
         string tokenString = _jwtTokenService.CreateToken(user, isLdap);
+        _logger?.LogInformation(
+            "Użytkownik {UserId} zalogował się z rolą {Role} metodą {AuthenticationMethod}.",
+            user.Id,
+            user.Rank?.Rank1 ?? "user",
+            isLdap ? "ldap" : "password");
 
         return Ok(new LoginResponseDto(
             Message: message,

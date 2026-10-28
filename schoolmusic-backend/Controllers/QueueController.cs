@@ -21,17 +21,20 @@ namespace schoolmusic_backend.Controllers
         private readonly IRadioStatusService _radioStatusService;
         private readonly IBreakService _breakService;
         private readonly schoolmusicContext _context;
+        private readonly ILogger<QueueController>? _logger;
 
         public QueueController(
             IQueueService queueService,
             IRadioStatusService radioStatusService,
             IBreakService breakService,
-            schoolmusicContext context)
+            schoolmusicContext context,
+            ILogger<QueueController>? logger = null)
         {
             _queueService = queueService;
             _radioStatusService = radioStatusService;
             _breakService = breakService;
             _context = context;
+            _logger = logger;
         }
 
         /// <summary>
@@ -227,7 +230,10 @@ namespace schoolmusic_backend.Controllers
             catch (Exception ex)
             {
                 await transaction.RollbackAsync();
-                return StatusCode(StatusCodes.Status500InternalServerError, new { Message = "Błąd podczas zmiany kolejności: " + ex.Message });
+                _logger?.LogError(ex,
+                    "Nie udało się zmienić kolejności utworów w kolejce przerwy {BreakId}.",
+                    breakId);
+                return StatusCode(StatusCodes.Status500InternalServerError, new { Message = "Nie udało się zmienić kolejności utworów. Spróbuj ponownie." });
             }
 
             await _queueService.BroadcastQueueAsync(breakId);

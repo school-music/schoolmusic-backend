@@ -136,7 +136,7 @@ public class LdapService : ILdapService
 
     private LdapAuthResult AuthenticateSimulated(string normalizedLogin, string password)
     {
-        _logger.LogInformation("Uwierzytelnianie konta '{Login}' w trybie symulacyjnym LDAP (Demo).", normalizedLogin);
+        _logger.LogInformation("Rozpoczęto uwierzytelnianie w trybie symulacyjnym LDAP (Demo).");
 
         var simulatedUsersSection = _configuration.GetSection("Ldap:SimulatedUsers");
         var users = simulatedUsersSection.GetChildren();
@@ -164,7 +164,7 @@ public class LdapService : ILdapService
                         bool inGroup = user.Groups.Any(g => string.Equals(g, requiredGroup, StringComparison.OrdinalIgnoreCase));
                         if (!inGroup)
                         {
-                            _logger.LogWarning("Symulowany użytkownik '{Login}' nie należy do wymaganej grupy '{RequiredGroup}'.", normalizedLogin, requiredGroup);
+                            _logger.LogWarning("Symulowane konto LDAP nie należy do wymaganej grupy '{RequiredGroup}'.", requiredGroup);
                             return LdapAuthResult.Fail("Konto szkolne nie posiada uprawnień do korzystania z systemu radiowęzła.");
                         }
                     }
@@ -216,7 +216,7 @@ public class LdapService : ILdapService
                 bindUser = normalizedLogin;
             }
 
-            _logger.LogInformation("Wykonywanie LDAP Bind dla '{BindUser}'...", bindUser);
+            _logger.LogInformation("Wykonywanie operacji LDAP Bind.");
             await connection.BindAsync(bindUser, password, cancellationToken);
 
             if (!connection.Connected)
@@ -264,7 +264,7 @@ public class LdapService : ILdapService
                 }
                 catch (Exception searchEx)
                 {
-                    _logger.LogWarning(searchEx, "Nie udało się pobrać szczegółowych atrybutów użytkownika z LDAP: {Message}", searchEx.Message);
+                    _logger.LogWarning(searchEx, "Nie udało się pobrać szczegółowych atrybutów konta z LDAP.");
                 }
             }
 
@@ -282,8 +282,7 @@ public class LdapService : ILdapService
 
                 if (!inGroup)
                 {
-                    _logger.LogWarning("Użytkownik LDAP '{Login}' nie należy do wymaganej grupy '{RequiredGroup}'. Grupy: [{Groups}]",
-                        normalizedLogin, requiredGroup, string.Join(", ", ldapUser.Groups));
+                    _logger.LogWarning("Konto LDAP nie należy do wymaganej grupy '{RequiredGroup}'.", requiredGroup);
                     return LdapAuthResult.Fail("Konto szkolne nie posiada uprawnień do korzystania z systemu radiowęzła.");
                 }
             }
@@ -292,8 +291,7 @@ public class LdapService : ILdapService
         }
         catch (LdapException ldapEx)
         {
-            _logger.LogWarning("Błąd uwierzytelniania LDAP dla '{Login}': kod={ResultCode}, {Message}",
-                normalizedLogin, ldapEx.ResultCode, ldapEx.Message);
+            _logger.LogWarning("Błąd uwierzytelniania LDAP: kod={ResultCode}.", ldapEx.ResultCode);
 
             if (ldapEx.ResultCode == LdapException.InvalidCredentials)
             {
@@ -305,7 +303,7 @@ public class LdapService : ILdapService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Nieoczekiwany wyjątek podczas komunikacji z serwerem LDAP: {Message}", ex.Message);
+            _logger.LogError(ex, "Nieoczekiwany wyjątek podczas komunikacji z serwerem LDAP.");
             return LdapAuthResult.Fail("Błąd połączenia ze szkolnym serwerem kont.");
         }
     }

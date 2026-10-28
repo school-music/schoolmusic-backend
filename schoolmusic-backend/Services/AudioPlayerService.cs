@@ -51,6 +51,7 @@ namespace schoolmusic_backend.Services
         private readonly LibVLCSharp.Shared.LibVLC _libVLC;
         private readonly MediaPlayer _mediaPlayer;
         private readonly IHubContext<QueueHub> _hubContext;
+        private readonly ILogger<AudioPlayerService> _logger;
         private readonly object _lock = new();
 
         private string _currentSource = "None";
@@ -59,9 +60,12 @@ namespace schoolmusic_backend.Services
 
         public event Action? MediaEnded;
 
-        public AudioPlayerService(IHubContext<QueueHub> hubContext)
+        public AudioPlayerService(
+            IHubContext<QueueHub> hubContext,
+            ILogger<AudioPlayerService> logger)
         {
             _hubContext = hubContext;
+            _logger = logger;
 
             string[] vlcOptions =
             {
@@ -82,20 +86,20 @@ namespace schoolmusic_backend.Services
             {
                 Task.Run(async () =>
                 {
-                    lock (_lock)
-                    {
-                        _currentSource = "None";
-                        _currentTitle = null;
-                        _currentArtist = null;
-                    }
-                    await BroadcastPlaybackStatusAsync();
                     try
                     {
+                        lock (_lock)
+                        {
+                            _currentSource = "None";
+                            _currentTitle = null;
+                            _currentArtist = null;
+                        }
+                        await BroadcastPlaybackStatusAsync();
                         MediaEnded?.Invoke();
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[AudioPlayerService] Błąd w obsłudze MediaEnded: {ex.Message}");
+                        _logger.LogError(ex, "Błąd podczas obsługi zakończenia lokalnego odtwarzania.");
                     }
                 });
             };
@@ -104,11 +108,19 @@ namespace schoolmusic_backend.Services
             {
                 Task.Run(async () =>
                 {
-                    lock (_lock)
+                    try
                     {
-                        _currentSource = "None";
+                        lock (_lock)
+                        {
+                            _currentSource = "None";
+                        }
+                        _logger.LogError("LibVLC zgłosił błąd lokalnego odtwarzania.");
+                        await BroadcastPlaybackStatusAsync();
                     }
-                    await BroadcastPlaybackStatusAsync();
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Błąd podczas obsługi awarii lokalnego odtwarzania.");
+                    }
                 });
             };
         }
@@ -261,12 +273,16 @@ namespace schoolmusic_backend.Services
                 }
 
                 await BroadcastPlaybackStatusAsync();
+                _logger.LogInformation(
+                    "Rozpoczęto lokalne odtwarzanie ze źródła {Source}.",
+                    source);
 
                 return ServiceResult<PlayerStatusDto>.Ok(GetStatus(), "Rozpoczęto odtwarzanie.");
             }
             catch (Exception ex)
             {
-                return ServiceResult<PlayerStatusDto>.BadRequest($"Błąd podczas uruchamiania odtwarzania: {ex.Message}");
+                _logger.LogError(ex, "Nie udało się uruchomić lokalnego odtwarzania.");
+                return ServiceResult<PlayerStatusDto>.BadRequest("Nie udało się uruchomić lokalnego odtwarzania.");
             }
         }
 

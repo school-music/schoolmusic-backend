@@ -16,7 +16,8 @@ public sealed record PlayFileDto(string PathOrUrl, string? Title, string? Artist
 public sealed class PlayerController(
     ISpotifyConnectPlaybackService spotify,
     IAudioPlayerService audioPlayer,
-    IBreakSchedulerService scheduler) : ControllerBase
+    IBreakSchedulerService scheduler,
+    ILogger<PlayerController>? logger = null) : ControllerBase
 {
     /// <summary>
     /// Pobiera aktualny stan odtwarzacza (tytuł, wykonawca, postęp, głośność, status odtwarzania).
@@ -110,6 +111,7 @@ public sealed class PlayerController(
         catch (Exception ex) when (ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException)
         {
             // Local playback remains available when Spotify is disconnected.
+            logger?.LogWarning(ex, "Nie udało się wstrzymać Spotify przed lokalnym odtwarzaniem pliku.");
         }
 
         return FromAudioResult(await audioPlayer.PlayFileOrUrlAsync(
@@ -152,6 +154,7 @@ public sealed class PlayerController(
         catch (Exception ex) when (ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException)
         {
             // Local playback must remain available when Spotify is disconnected.
+            logger?.LogWarning(ex, "Nie udało się wstrzymać Spotify przed lokalnym odtwarzaniem.");
         }
 
         return FromAudioResult(await audioPlayer.PlayFileOrUrlAsync(dto.PathOrUrl, dto.Title, dto.Artist));
@@ -172,6 +175,7 @@ public sealed class PlayerController(
         catch (Exception ex) when (ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException)
         {
             // Stopping local playback does not depend on the Connect device being available.
+            logger?.LogWarning(ex, "Nie udało się wstrzymać Spotify podczas zatrzymywania odtwarzacza.");
         }
 
         return FromAudioResult(result);

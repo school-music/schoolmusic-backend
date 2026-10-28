@@ -25,18 +25,21 @@ namespace schoolmusic_backend.Controllers
         private readonly IConnectionMultiplexer _redis;
         private readonly IHubContext<QueueHub> _hubContext;
         private readonly IQueueMutationLock _mutationLock;
+        private readonly ILogger<ModerationController>? _logger;
         private static readonly IQueueMutationLock DefaultMutationLock = new QueueMutationLock();
 
         public ModerationController(
             schoolmusicContext context,
             IConnectionMultiplexer redis,
             IHubContext<QueueHub> hubContext,
-            IQueueMutationLock? mutationLock = null)
+            IQueueMutationLock? mutationLock = null,
+            ILogger<ModerationController>? logger = null)
         {
             _context = context;
             _redis = redis;
             _hubContext = hubContext;
             _mutationLock = mutationLock ?? DefaultMutationLock;
+            _logger = logger;
         }
         /// <summary>
         /// Reprezentuje propozycję utworu przesłaną przez użytkownika.
@@ -148,9 +151,10 @@ namespace schoolmusic_backend.Controllers
                         proposals.Add(dto);
                     }
                 }
-                catch
+                catch (Exception ex) when (ex is JsonException or NotSupportedException)
                 {
                     // Ignoruj wpisy o niezgodnym formacie
+                    _logger?.LogWarning("Pominięto nieprawidłowy wpis w kolejce moderacji Redis.");
                 }
             }
 
@@ -201,8 +205,9 @@ namespace schoolmusic_backend.Controllers
                             break;
                         }
                     }
-                    catch
+                    catch (Exception ex) when (ex is JsonException or NotSupportedException)
                     {
+                        _logger?.LogWarning("Pominięto nieprawidłowy wpis w kolejce moderacji Redis.");
                     }
                 }
             }
@@ -227,6 +232,12 @@ namespace schoolmusic_backend.Controllers
 
             await db.ListRemoveAsync(pendingKey, matchingRedisValue, 1);
             await db.KeyDeleteAsync(PendingProposalStore.GetDeduplicationKey(breakId, song.Id));
+            _logger?.LogInformation(
+                "Moderator {ModeratorUserId} zatwierdził propozycję {ProposalId} jako pozycję {QueueItemId} przerwy {BreakId}.",
+                modUserId,
+                proposalId,
+                queueItem.Id,
+                breakId);
 
             // Powiadamiamy wszystkich podłączonych do tej przerwy o nowej zatwierdzonej piosence
             // poprzez SignalR i aktualizujemy kolejkę w czasie rzeczywistym
@@ -309,8 +320,9 @@ namespace schoolmusic_backend.Controllers
                             break;
                         }
                     }
-                    catch
+                    catch (Exception ex) when (ex is JsonException or NotSupportedException)
                     {
+                        _logger?.LogWarning("Pominięto nieprawidłowy wpis w kolejce moderacji Redis.");
                     }
                 }
             }
@@ -329,6 +341,11 @@ namespace schoolmusic_backend.Controllers
             await db.KeyDeleteAsync(PendingProposalStore.GetDeduplicationKey(
                 matchingProposal.BreakId,
                 matchingProposal.SongId));
+            _logger?.LogInformation(
+                "Moderator {ModeratorUserId} odrzucił propozycję {ProposalId} dla przerwy {BreakId}.",
+                modUserId,
+                proposalId,
+                matchingProposal.BreakId);
 
             bool blacklisted = false;
             if (addToBlacklist)

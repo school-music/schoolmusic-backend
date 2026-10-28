@@ -60,7 +60,28 @@ builder.Services.AddAuthentication(options=>
         ValidAudience = jwtSettings.Audience,
         IssuerSigningKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(key),
        ClockSkew = TimeSpan.Zero
-   };
+    };
+    options.Events = new JwtBearerEvents
+    {
+        OnAuthenticationFailed = context =>
+        {
+            var logger = context.HttpContext.RequestServices
+                .GetRequiredService<ILoggerFactory>()
+                .CreateLogger("JwtAuthentication");
+            logger.LogWarning(
+                "Odrzucono token JWT z powodu błędu {ExceptionType}.",
+                context.Exception.GetType().Name);
+            return Task.CompletedTask;
+        },
+        OnForbidden = context =>
+        {
+            var logger = context.HttpContext.RequestServices
+                .GetRequiredService<ILoggerFactory>()
+                .CreateLogger("JwtAuthorization");
+            logger.LogWarning("Odrzucono uwierzytelnione żądanie z powodu niewystarczających uprawnień.");
+            return Task.CompletedTask;
+        }
+    };
 });
 
 // Add services to the container.

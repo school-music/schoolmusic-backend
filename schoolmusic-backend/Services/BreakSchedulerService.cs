@@ -209,6 +209,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             if (result.Success)
             {
                 _activeSpecialEventId = pendingEvent.Id;
+                _logger.LogInformation("Rozpoczęto wydarzenie specjalne {EventId}.", pendingEvent.Id);
             }
             else
             {
@@ -240,6 +241,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 {
                     completedEvent.EventStatus = "done";
                     await db.SaveChangesAsync(cancellationToken);
+                    _logger.LogInformation("Zakończono wydarzenie specjalne {EventId}.", eventId);
                 }
                 _activeSpecialEventId = null;
             }
@@ -407,6 +409,10 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 _lastPlayingTrackIndex = -1;
                 _queueSubmitted = false;
             }
+            _logger.LogInformation(
+                "Rozpoczęto obsługę przerwy {BreakId}; plan zawiera {TrackCount} utworów.",
+                activeBreak.Id,
+                tracks.Count);
             var recoverySpotify = scope.ServiceProvider.GetService<ISpotifyConnectPlaybackService>();
             if (recoverySpotify != null)
                 await TryRecoverActivePlaybackAsync(db, queueService, recoverySpotify, cancellationToken);
@@ -672,6 +678,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             _lastPlayingTrackIndex = -1;
             _queueSubmitted = false;
         }
+        _logger.LogInformation("Zakończono obsługę przerwy {BreakId}.", breakId);
     }
 
     private async Task<SystemStatusDto> BroadcastSchoolStatusIfChangedAsync(IServiceScope scope, CancellationToken cancellationToken)

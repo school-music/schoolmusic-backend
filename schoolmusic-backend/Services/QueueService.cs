@@ -53,6 +53,7 @@ namespace schoolmusic_backend.Services
         private readonly IConfiguration? _configuration;
         private readonly IQueueMutationLock _mutationLock;
         private readonly TimeProvider _timeProvider;
+        private readonly ILogger<QueueService>? _logger;
 
         public QueueService(
             schoolmusicContext context,
@@ -61,7 +62,8 @@ namespace schoolmusic_backend.Services
             ISongSourceService songSourceService,
             IConfiguration? configuration = null,
             IQueueMutationLock? mutationLock = null,
-            TimeProvider? timeProvider = null)
+            TimeProvider? timeProvider = null,
+            ILogger<QueueService>? logger = null)
         {
             _context = context;
             _redis = redis;
@@ -70,6 +72,7 @@ namespace schoolmusic_backend.Services
             _configuration = configuration;
             _mutationLock = mutationLock ?? DefaultMutationLock;
             _timeProvider = timeProvider ?? TimeProvider.System;
+            _logger = logger;
         }
 
         /// <summary>
@@ -412,10 +415,19 @@ namespace schoolmusic_backend.Services
                 {
                     if (transaction != null)
                         await transaction.RollbackAsync();
+                    _logger?.LogWarning(ex,
+                        "Odrzucono równoczesne dodanie utworu {SongId} do kolejki przerwy {BreakId}.",
+                        song.Id,
+                        targetBreakId);
                     return ServiceResult<object>.Conflict("Ten utwór został już zgłoszony lub kolejka zmieniła się równocześnie. Odśwież kolejkę i spróbuj ponownie.");
                 }
 
                 await BroadcastQueueAsync(targetBreakId);
+                _logger?.LogInformation(
+                    "Dodano zatwierdzony utwór {SongId} jako pozycję {QueueItemId} kolejki przerwy {BreakId}.",
+                    song.Id,
+                    queueItem.Id,
+                    targetBreakId);
 
                 return ServiceResult<object>.Created(new
                 {
@@ -437,72 +449,103 @@ namespace schoolmusic_backend.Services
             }
 
             // Utwór spoza Greenlisty trafia do Redis do weryfikacji przez moderatorów
-            var db = _redis.GetDatabase();
-
-            var existingPending = await db.ListRangeAsync(PendingProposalStore.ListKey);
-            foreach (var item in existingPending)
-            {
-                if (item.HasValue && item.ToString().Contains($"\"songId\":{song.Id}") && item.ToString().Contains($"\"breakId\":{targetBreakId}"))
-                {
-                    return ServiceResult<object>.Conflict("Ten utwór już oczekuje na weryfikację przez moderatora na tę przerwę.");
-                }
-            }
-
-            var userEntity = await _context.Users.FindAsync(currentUserId);
-
-            var proposal = new
-            {
-                id = Guid.NewGuid().ToString(),
-                songId = song.Id,
-                spotifyId = song.SpotifyId,
-                title = song.Title,
-                artist = song.Artist?.Name ?? "Nieznany wykonawca",
-                cover = song.Cover,
-                durationMs = song.DurationMs,
-                breakId = targetBreakId,
-                breakNumber = targetBreakEntity.BreakNumber,
-                userId = currentUserId,
-                submittedBy = userEntity?.UserLogin ?? "Uczeń",
-                submittedAt = _timeProvider.GetUtcNow().UtcDateTime
-            };
-
-            var deduplicationKey = PendingProposalStore.GetDeduplicationKey(targetBreakId, song.Id);
-            var reserved = await db.StringSetAsync(
-                deduplicationKey,
-                proposal.id,
-                expiry: (TimeSpan?)null,
-                when: When.NotExists);
-            if (!reserved)
-            {
-                return ServiceResult<object>.Conflict("Ten utwór już oczekuje na weryfikację przez moderatora na tę przerwę.");
-            }
-
             try
             {
-                await db.ListRightPushAsync(PendingProposalStore.ListKey, JsonSerializer.Serialize(proposal));
-            }
-            catch
-            {
-                await db.KeyDeleteAsync(deduplicationKey);
-                throw;
-            }
+                var db = _redis.GetDatabase();
 
-            return ServiceResult<object>.Accepted(new
-            {
-                Status = "pending",
-                Message = "Piosenka została przesłana do weryfikacji przez moderatora. Po zatwierdzeniu pojawi się w rankingu.",
-                proposalId = proposal.id,
-                breakId = targetBreakId,
-                breakNumber = targetBreakEntity.BreakNumber,
-                song = new
+                var existingPending = await db.ListRangeAsync(PendingProposalStore.ListKey);
+                foreach (var item in existingPending)
                 {
+                    if (item.HasValue && item.ToString().Contains($"\"songId\":{song.Id}") && item.ToString().Contains($"\"breakId\":{targetBreakId}"))
+                    {
+                        return ServiceResult<object>.Conflict("Ten utwór już oczekuje na weryfikację przez moderatora na tę przerwę.");
+                    }
+                }
+
+                var userEntity = await _context.Users.FindAsync(currentUserId);
+
+                var proposal = new
+                {
+                    id = Guid.NewGuid().ToString(),
                     songId = song.Id,
+                    spotifyId = song.SpotifyId,
                     title = song.Title,
                     artist = song.Artist?.Name ?? "Nieznany wykonawca",
                     cover = song.Cover,
-                    durationMs = song.DurationMs
+                    durationMs = song.DurationMs,
+                    breakId = targetBreakId,
+                    breakNumber = targetBreakEntity.BreakNumber,
+                    userId = currentUserId,
+                    submittedBy = userEntity?.UserLogin ?? "Uczeń",
+                    submittedAt = _timeProvider.GetUtcNow().UtcDateTime
+                };
+
+                var deduplicationKey = PendingProposalStore.GetDeduplicationKey(targetBreakId, song.Id);
+                var reserved = await db.StringSetAsync(
+                    deduplicationKey,
+                    proposal.id,
+                    expiry: (TimeSpan?)null,
+                    when: When.NotExists);
+                if (!reserved)
+                {
+                    return ServiceResult<object>.Conflict("Ten utwór już oczekuje na weryfikację przez moderatora na tę przerwę.");
                 }
-            });
+
+                try
+                {
+                    await db.ListRightPushAsync(PendingProposalStore.ListKey, JsonSerializer.Serialize(proposal));
+                }
+                catch (RedisException ex)
+                {
+                    _logger?.LogWarning(ex,
+                        "Nie udało się dopisać propozycji utworu {SongId} do kolejki moderacji; rezerwacja zostanie zwolniona.",
+                        song.Id);
+                    try
+                    {
+                        await db.KeyDeleteAsync(deduplicationKey);
+                    }
+                    catch (RedisException cleanupException)
+                    {
+                        _logger?.LogWarning(cleanupException,
+                            "Nie udało się usunąć rezerwacji propozycji dla utworu {SongId} i przerwy {BreakId}.",
+                            song.Id,
+                            targetBreakId);
+                    }
+                    throw;
+                }
+
+                _logger?.LogInformation(
+                    "Zapisano propozycję {ProposalId} utworu {SongId} dla przerwy {BreakId} w kolejce moderacji.",
+                    proposal.id,
+                    song.Id,
+                    targetBreakId);
+
+                return ServiceResult<object>.Accepted(new
+                {
+                    Status = "pending",
+                    Message = "Piosenka została przesłana do weryfikacji przez moderatora. Po zatwierdzeniu pojawi się w rankingu.",
+                    proposalId = proposal.id,
+                    breakId = targetBreakId,
+                    breakNumber = targetBreakEntity.BreakNumber,
+                    song = new
+                    {
+                        songId = song.Id,
+                        title = song.Title,
+                        artist = song.Artist?.Name ?? "Nieznany wykonawca",
+                        cover = song.Cover,
+                        durationMs = song.DurationMs
+                    }
+                });
+            }
+            catch (RedisException ex)
+            {
+                _logger?.LogError(ex,
+                    "Redis jest niedostępny podczas zapisu propozycji utworu {SongId} dla przerwy {BreakId}.",
+                    song.Id,
+                    targetBreakId);
+                return ServiceResult<object>.ServiceUnavailable(
+                    "Kolejka moderacji jest chwilowo niedostępna. Spróbuj ponownie za chwilę.");
+            }
         }
 
         /// <summary>
@@ -640,11 +683,20 @@ namespace schoolmusic_backend.Services
                 {
                     if (transaction != null)
                         await transaction.RollbackAsync();
+                    _logger?.LogWarning(ex,
+                        "Odrzucono równoczesny głos użytkownika {UserId} w kolejce przerwy {BreakId}.",
+                        currentUserId,
+                        targetBreakId);
                     return ServiceResult<object>.Conflict("Głos został już oddany lub kolejka zmieniła się równocześnie. Odśwież dane i spróbuj ponownie.");
                 }
             }
 
             await BroadcastQueueAsync(targetBreakId);
+            _logger?.LogInformation(
+                "Użytkownik {UserId} oddał głos na pozycję {QueueItemId} kolejki przerwy {BreakId}.",
+                currentUserId,
+                targetQueueItemId,
+                targetBreakId);
 
             return ServiceResult<object>.Ok(new
             {
@@ -689,6 +741,11 @@ namespace schoolmusic_backend.Services
             }
 
             await BroadcastQueueAsync(breakId.Value);
+            _logger?.LogInformation(
+                "Użytkownik {UserId} cofnął głos na pozycję {QueueItemId} kolejki przerwy {BreakId}.",
+                currentUserId,
+                queueItemId,
+                breakId.Value);
 
             return ServiceResult<object>.Ok(new
             {
@@ -775,6 +832,11 @@ namespace schoolmusic_backend.Services
 
             // Rozsyłamy powiadomienie SignalR (kolejka jest teraz wyczyszczona)
             await BroadcastQueueAsync(breakId);
+            _logger?.LogInformation(
+                "Zarchiwizowano przerwę {BreakId}: {ArchivedCount} odtworzonych i {ClearedCount} usuniętych pozycji.",
+                breakId,
+                playedTracksInfo.Count,
+                totalClearedTracks);
 
             return ServiceResult<object>.Ok(new
             {
