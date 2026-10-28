@@ -34,8 +34,22 @@ namespace schoolmusic_backend.Controllers
         [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
         public async Task<IActionResult> GetDashboard(CancellationToken cancellationToken)
         {
-            var dashboard = await _statisticsService.GetDashboardAsync(cancellationToken);
-            return Ok(dashboard);
+            try
+            {
+                var dashboard = await _statisticsService.GetDashboardAsync(cancellationToken);
+                return Ok(dashboard);
+            }
+            catch (StatisticsUnavailableException ex)
+            {
+                Response.Headers.RetryAfter = "15";
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+                {
+                    StatusCode = 503,
+                    Message = ex.Message,
+                    IsAvailable = false,
+                    RetryAfter = 15
+                });
+            }
         }
     }
 }

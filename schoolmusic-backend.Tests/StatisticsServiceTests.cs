@@ -1,8 +1,11 @@
 using System.Linq;
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
+using schoolmusic_backend.Controllers;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 using StackExchange.Redis;
@@ -447,5 +450,60 @@ public class StatisticsServiceTests
         Assert.Equal("Fallback Song", dto.TopSongs[0].Title);
         Assert.Equal(1, dto.TopSongs[0].PlaysCount);
         Assert.Equal(7, dto.DailyActivity.Count);
+        Assert.True(dto.IsAvailable);
+    }
+
+    [Fact]
+    public async Task GetDashboardAsync_WhenDatabaseFails_ThrowsStatisticsUnavailableException_NeverRetryLoops()
+    {
+        var context = CreateInMemoryContext(nameof(GetDashboardAsync_WhenDatabaseFails_ThrowsStatisticsUnavailableException_NeverRetryLoops));
+        // Dispose context immediately to simulate a failed database connection / state
+        await context.DisposeAsync();
+
+        var mockRedis = new Mock<IConnectionMultiplexer>();
+        var mockDb = new Mock<IDatabase>();
+        mockDb.Setup(d => d.StringGetAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>())).ReturnsAsync(RedisValue.Null);
+        mockRedis.Setup(r => r.GetDatabase(It.IsAny<int>(), It.IsAny<object>())).Returns(mockDb.Object);
+
+        var service = new StatisticsService(
+            context,
+            mockRedis.Object,
+            new ManualTimeProvider(Now),
+            NullLogger<StatisticsService>.Instance);
+
+        var startTime = DateTime.UtcNow;
+        var ex = await Assert.ThrowsAsync<StatisticsUnavailableException>(() => service.GetDashboardAsync());
+        var duration = DateTime.UtcNow - startTime;
+
+        Assert.Contains("Statystyki są chwilowo niedostępne", ex.Message);
+        // Verify it failed promptly and did NOT execute a retry loop
+        Assert.True(duration < TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task StatisticsController_WhenServiceThrowsStatisticsUnavailable_Returns503WithRetryAfterHeader()
+    {
+        var mockService = new Mock<IStatisticsService>();
+        mockService.Setup(s => s.GetDashboardAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new StatisticsUnavailableException("Statystyki są chwilowo niedostępne z powodu problemu z bazą danych."));
+
+        var controller = new StatisticsController(mockService.Object)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext()
+            }
+        };
+
+        var result = await controller.GetDashboard(CancellationToken.None);
+
+        var objectResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, objectResult.StatusCode);
+        Assert.Equal("15", controller.Response.Headers.RetryAfter.ToString());
+
+        var body = objectResult.Value;
+        Assert.NotNull(body);
+        var isAvailableProp = body.GetType().GetProperty("IsAvailable")?.GetValue(body);
+        Assert.Equal(false, isAvailableProp);
     }
 }
