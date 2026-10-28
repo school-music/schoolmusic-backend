@@ -21,7 +21,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /app/publish .
 
-RUN mkdir -p /app/recordings
+# Aplikacja działa jako użytkownik bez uprawnień roota. Członkostwo w grupie audio
+# jest dodawane tylko wtedy, gdy obraz udostępnia tę grupę.
+RUN groupadd --system --gid 10001 schoolmusic \
+    && useradd --system --uid 10001 --gid schoolmusic --create-home schoolmusic \
+    && mkdir -p /app/recordings \
+    && chown -R schoolmusic:schoolmusic /app \
+    && if getent group audio >/dev/null; then usermod -aG audio schoolmusic; fi
+
+USER schoolmusic
 
 EXPOSE 8080
 ENV ASPNETCORE_HTTP_PORTS=8080

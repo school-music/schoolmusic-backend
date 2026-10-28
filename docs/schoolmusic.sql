@@ -548,7 +548,7 @@ INSERT INTO `weekly_schedule` (`weekday`, `music_enabled`) VALUES
 --
 DROP TABLE IF EXISTS `song_vote_counts`;
 
-CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `song_vote_counts`  AS SELECT `s`.`id` AS `song_id`, `s`.`title` AS `title`, count(`v`.`id`) AS `total_votes` FROM ((`songs` `s` left join `queue_items` `qi` on(`qi`.`song_id` = `s`.`id`)) left join `votes` `v` on(`v`.`queue_item_id` = `qi`.`id`)) WHERE `s`.`is_active` = 1 GROUP BY `s`.`id`, `s`.`title` ;
+CREATE ALGORITHM=UNDEFINED SQL SECURITY INVOKER VIEW `song_vote_counts`  AS SELECT `s`.`id` AS `song_id`, `s`.`title` AS `title`, count(`v`.`id`) AS `total_votes` FROM ((`songs` `s` left join `queue_items` `qi` on(`qi`.`song_id` = `s`.`id`)) left join `votes` `v` on(`v`.`queue_item_id` = `qi`.`id`)) WHERE `s`.`is_active` = 1 GROUP BY `s`.`id`, `s`.`title` ;
 
 --
 -- Indeksy dla zrzutów tabel

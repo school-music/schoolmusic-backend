@@ -1,0 +1,23 @@
+# Pliki lokalne i artefakty kompilacji nie są potrzebne w kontekście obrazu.
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/.idea/
+**/TestResults/
+**/*.user
+**/*.suo
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/recordings/
+.env
+.env.*
+!.env.example
+.git/
+.gitignore
+.github/
+docs/KONKURS PROGRAMISTYCZNY.pdf
+docker-compose*.yml
+README.md
+LICENSE
