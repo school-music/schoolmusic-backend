@@ -215,7 +215,7 @@ CREATE TABLE `moderators` (
 --
 
 INSERT INTO `moderators` (`id`, `user_id`, `artists_banned`, `songs_banned`, `songs_approved`) VALUES
-(1, 1, 0, 0, 1);
+(1, 2, 0, 0, 1);
 
 -- --------------------------------------------------------
 
@@ -477,9 +477,9 @@ CREATE TABLE `users` (
 --
 
 INSERT INTO `users` (`id`, `user_login`, `user_password`, `rank_id`, `created_at`, `password_changed_at`) VALUES
-(1, 'Szymon', '$2a$11$zNoEKWex7gSV3IqX55UHVe1HadXBlp29nt5uhNIG8f3d62PUZdHo.', 4, '2026-09-29 18:22:10', '2026-09-29 18:22:10'),
-(2, 'Ola', '$2a$11$UHHiyxzvHTn32q5UjUYu6uHIXQD6Ete.v2zVZ7M6qACTSHRpgrw/e', 1, '2026-10-02 20:28:30', '2026-10-02 20:28:30'),
-(3, 'Kamil', '$2a$11$usJnhZ8QDO/OtXgiujQlrO.aUMJS.IFu4K2782dfAS5U4u1EG29wy', 1, '2026-10-09 20:39:45', '2026-10-09 20:39:45');
+(1, 'admin', '$2a$11$RfCjUetz/HFf3dTZfc45ouyOAhxB36VPBczvr34R9J1eM3wtEQnDG', 4, '2026-09-29 18:22:10', '2026-09-29 18:22:10'),
+(2, 'moderator', '$2a$11$kNcBLK8P86/pbT.hsniFnOT3vk.Ps2RGMH7qoqfzPo/psGUkMIaeq', 2, '2026-10-02 20:28:30', '2026-10-02 20:28:30'),
+(3, 'uczen', '$2a$11$8WtVBUU47ym4pfvO3SpLd.MAqDpjZ1EMDEWC.RsDt/Ay5AscDVdji', 1, '2026-10-09 20:39:45', '2026-10-09 20:39:45');
 
 -- --------------------------------------------------------
 
@@ -546,7 +546,7 @@ INSERT INTO `weekly_schedule` (`weekday`, `music_enabled`) VALUES
 --
 -- Struktura widoku `song_vote_counts`
 --
-DROP TABLE IF EXISTS `song_vote_counts`;
+DROP VIEW IF EXISTS `song_vote_counts`;
 
 CREATE ALGORITHM=UNDEFINED SQL SECURITY INVOKER VIEW `song_vote_counts`  AS SELECT `s`.`id` AS `song_id`, `s`.`title` AS `title`, count(`v`.`id`) AS `total_votes` FROM ((`songs` `s` left join `queue_items` `qi` on(`qi`.`song_id` = `s`.`id`)) left join `votes` `v` on(`v`.`queue_item_id` = `qi`.`id`)) WHERE `s`.`is_active` = 1 GROUP BY `s`.`id`, `s`.`title` ;
 
