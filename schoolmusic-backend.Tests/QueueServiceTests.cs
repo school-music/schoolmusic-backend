@@ -35,6 +35,12 @@ public class QueueServiceTests
                 .ReturnsAsync(Array.Empty<RedisValue>());
             defaultDb.Setup(db => db.ListRightPushAsync(It.IsAny<RedisKey>(), It.IsAny<RedisValue>(), It.IsAny<When>(), It.IsAny<CommandFlags>()))
                 .ReturnsAsync(1);
+            defaultDb.Setup(db => db.StringSetAsync(
+                    It.IsAny<RedisKey>(),
+                    It.IsAny<RedisValue>(),
+                    It.IsAny<TimeSpan?>(),
+                    It.IsAny<When>()))
+                .ReturnsAsync(true);
             defaultRedis.Setup(r => r.GetDatabase(It.IsAny<int>(), It.IsAny<object>()))
                 .Returns(defaultDb.Object);
             redisConnection = defaultRedis;
@@ -215,6 +221,12 @@ public class QueueServiceTests
                 It.IsAny<When>(),
                 It.IsAny<CommandFlags>()))
             .ReturnsAsync(1);
+        database.Setup(db => db.StringSetAsync(
+                It.IsAny<RedisKey>(),
+                It.IsAny<RedisValue>(),
+                It.IsAny<TimeSpan?>(),
+                It.IsAny<When>()))
+            .ReturnsAsync(true);
 
         var (service, context) = CreateService(
             nameof(ProposeSongAsync_ImportsMissingSpotifyTrackBeforeSubmitting),
@@ -535,5 +547,182 @@ public class QueueServiceTests
 
         Assert.True(result.Success);
         Assert.Contains(result.StatusCode, new[] { 200, 202 });
+    }
+
+    [Fact]
+    public async Task VoteAsync_WhenTrackIsAlreadyPlaying_ReturnsBadRequest()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Voting:AllowVotingOutsideSchedule"] = "true"
+            })
+            .Build();
+        var (service, context) = CreateService(
+            nameof(VoteAsync_WhenTrackIsAlreadyPlaying_ReturnsBadRequest),
+            configuration: config);
+        var now = DateTime.Now;
+        context.Breaks.Add(new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now, EndsAt = now.AddMinutes(10), MusicEnabled = true
+        });
+        context.QueueItems.Add(new QueueItem
+        {
+            Id = 1, BreakId = 1, SongId = 1, Status = "playing",
+            ModerationStatus = "approved", OrderIndex = 1
+        });
+        await context.SaveChangesAsync();
+
+        var result = await service.VoteAsync(new VoteRequestDto(1), currentUserId: 5);
+
+        Assert.False(result.Success);
+        Assert.Equal(400, result.StatusCode);
+        Assert.Empty(context.Votes);
+    }
+
+    [Fact]
+    public async Task VoteAsync_WhenSameVoteIsSubmittedConcurrently_StoresOnlyOneVote()
+    {
+        var databaseName = nameof(VoteAsync_WhenSameVoteIsSubmittedConcurrently_StoresOnlyOneVote);
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Voting:AllowVotingOutsideSchedule"] = "true"
+            })
+            .Build();
+        var (firstService, firstContext) = CreateService(databaseName, configuration: config);
+        var (secondService, secondContext) = CreateService(databaseName, configuration: config);
+        var now = DateTime.Now;
+        var artist = new Artist { Id = 1, Name = "Artysta", Source = "other" };
+        var song = new Song { Id = 1, Title = "Utwór", ArtistId = 1, Artist = artist, DurationMs = 180000, Source = "other" };
+        var submitter = new User { Id = 2, UserLogin = "submitter", UserPassword = "hash", RankId = 1 };
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now, EndsAt = now.AddMinutes(10), MusicEnabled = true
+        };
+        firstContext.AddRange(artist, song, submitter, breakEntity);
+        firstContext.QueueItems.Add(new QueueItem
+        {
+            Id = 1, BreakId = 1, Break = breakEntity, SongId = 1, Song = song,
+            UserId = 2, User = submitter, Status = "queued", ModerationStatus = "approved", OrderIndex = 1
+        });
+        await firstContext.SaveChangesAsync();
+
+        var results = await Task.WhenAll(
+            firstService.VoteAsync(new VoteRequestDto(1), currentUserId: 5),
+            secondService.VoteAsync(new VoteRequestDto(1), currentUserId: 5));
+
+        Assert.Single(results, result => result.Success);
+        Assert.Single(results, result => result.StatusCode == 409);
+        await using var verification = CreateInMemoryContext(databaseName);
+        Assert.Equal(1, await verification.Votes.CountAsync(item => item.UserId == 5 && item.QueueItemId == 1));
+        await firstContext.DisposeAsync();
+        await secondContext.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ArchiveBreakAsync_WhenCalledTwice_DoesNotDuplicateHistory()
+    {
+        var (service, context) = CreateService(nameof(ArchiveBreakAsync_WhenCalledTwice_DoesNotDuplicateHistory));
+        var now = DateTime.Now;
+        var breakEntity = new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+            StartAt = now.AddMinutes(-10), EndsAt = now, MusicEnabled = true
+        };
+        var artist = new Artist { Id = 1, Name = "Artysta", Source = "other" };
+        var song = new Song { Id = 1, Title = "Utwór", ArtistId = 1, Artist = artist, DurationMs = 180000, Source = "other" };
+        context.AddRange(breakEntity, artist, song);
+        context.QueueItems.Add(new QueueItem
+        {
+            Id = 1, BreakId = 1, Break = breakEntity, SongId = 1, Song = song,
+            Status = "played", ModerationStatus = "approved", OrderIndex = 1
+        });
+        await context.SaveChangesAsync();
+
+        var first = await service.ArchiveBreakAsync(1);
+        var second = await service.ArchiveBreakAsync(1);
+
+        Assert.True(first.Success);
+        Assert.True(second.Success);
+        Assert.Single(context.Histories);
+    }
+
+    [Fact]
+    public async Task ArchiveBreakAsync_WhenBreakDoesNotExist_ReturnsNotFoundWithoutArchivingAnotherBreak()
+    {
+        var (service, context) = CreateService(nameof(ArchiveBreakAsync_WhenBreakDoesNotExist_ReturnsNotFoundWithoutArchivingAnotherBreak));
+        context.Breaks.Add(new Break
+        {
+            Id = 1, BreakDate = DateOnly.FromDateTime(DateTime.Today), BreakNumber = 1,
+            StartAt = DateTime.Today, EndsAt = DateTime.Today.AddMinutes(10), MusicEnabled = true
+        });
+        context.QueueItems.Add(new QueueItem
+        {
+            Id = 1, BreakId = 1, SongId = 1, Status = "queued", ModerationStatus = "approved", OrderIndex = 1
+        });
+        await context.SaveChangesAsync();
+
+        var result = await service.ArchiveBreakAsync(999);
+
+        Assert.False(result.Success);
+        Assert.Equal(404, result.StatusCode);
+        Assert.Single(context.QueueItems);
+    }
+
+    [Fact]
+    public async Task ProposeSongAsync_WhenSamePendingProposalIsSubmittedConcurrently_StoresOnlyOneRedisEntry()
+    {
+        var redis = new Mock<IConnectionMultiplexer>();
+        var database = new Mock<IDatabase>();
+        var reservation = 0;
+        database.Setup(item => item.ListRangeAsync(
+                It.IsAny<RedisKey>(), It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CommandFlags>()))
+            .ReturnsAsync(Array.Empty<RedisValue>());
+        database.Setup(item => item.StringSetAsync(
+                It.IsAny<RedisKey>(), It.IsAny<RedisValue>(), It.IsAny<TimeSpan?>(), When.NotExists))
+            .ReturnsAsync(() => Interlocked.CompareExchange(ref reservation, 1, 0) == 0);
+        database.Setup(item => item.ListRightPushAsync(
+                It.IsAny<RedisKey>(), It.IsAny<RedisValue>(), It.IsAny<When>(), It.IsAny<CommandFlags>()))
+            .ReturnsAsync(1);
+        redis.Setup(item => item.GetDatabase(It.IsAny<int>(), It.IsAny<object>())).Returns(database.Object);
+
+        var databaseName = nameof(ProposeSongAsync_WhenSamePendingProposalIsSubmittedConcurrently_StoresOnlyOneRedisEntry);
+        var (firstService, firstContext) = CreateService(databaseName, redisConnection: redis);
+        var (secondService, secondContext) = CreateService(databaseName, redisConnection: redis);
+        var now = DateTime.Now;
+        var artist = new Artist { Id = 1, Name = "Artysta", Source = "other" };
+        var song = new Song
+        {
+            Id = 1, Title = "Utwór", ArtistId = 1, Artist = artist,
+            DurationMs = 180000, Source = "other", CreatedAt = DateTime.UtcNow
+        };
+        firstContext.AddRange(
+            artist,
+            song,
+            new User { Id = 1, UserLogin = "first", UserPassword = "hash", RankId = 1 },
+            new User { Id = 2, UserLogin = "second", UserPassword = "hash", RankId = 1 },
+            new Break
+            {
+                Id = 1, BreakDate = DateOnly.FromDateTime(now), BreakNumber = 1,
+                StartAt = now.AddHours(1), EndsAt = now.AddHours(2), VoteEnds = now.AddMinutes(30), MusicEnabled = true
+            });
+        await firstContext.SaveChangesAsync();
+
+        var results = await Task.WhenAll(
+            firstService.ProposeSongAsync(new ProposeSongDto(SongId: 1, BreakId: 1), 1),
+            secondService.ProposeSongAsync(new ProposeSongDto(SongId: 1, BreakId: 1), 2));
+
+        Assert.Single(results, result => result.StatusCode == 202);
+        Assert.Single(results, result => result.StatusCode == 409);
+        database.Verify(item => item.ListRightPushAsync(
+            PendingProposalStore.ListKey,
+            It.IsAny<RedisValue>(),
+            When.Always,
+            CommandFlags.None), Times.Once);
+        await firstContext.DisposeAsync();
+        await secondContext.DisposeAsync();
     }
 }

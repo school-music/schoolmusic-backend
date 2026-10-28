@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
+using schoolmusic_backend.Extensions;
 using StackExchange.Redis;
 using System.Text.Json;
 
@@ -43,25 +44,29 @@ namespace schoolmusic_backend.Services
     public class QueueService : IQueueService
     {
         private const int SongCooldownHours = 24;
+        private static readonly IQueueMutationLock DefaultMutationLock = new QueueMutationLock();
 
         private readonly schoolmusicContext _context;
         private readonly IConnectionMultiplexer _redis;
         private readonly IHubContext<QueueHub> _hubContext;
         private readonly ISongSourceService _songSourceService;
         private readonly IConfiguration? _configuration;
+        private readonly IQueueMutationLock _mutationLock;
 
         public QueueService(
             schoolmusicContext context,
             IConnectionMultiplexer redis,
             IHubContext<QueueHub> hubContext,
             ISongSourceService songSourceService,
-            IConfiguration? configuration = null)
+            IConfiguration? configuration = null,
+            IQueueMutationLock? mutationLock = null)
         {
             _context = context;
             _redis = redis;
             _hubContext = hubContext;
             _songSourceService = songSourceService;
             _configuration = configuration;
+            _mutationLock = mutationLock ?? DefaultMutationLock;
         }
 
         /// <summary>
@@ -350,6 +355,8 @@ namespace schoolmusic_backend.Services
                 return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę zostało już zamknięte.");
             }
 
+            await using var mutationLock = await _mutationLock.AcquireAsync(targetBreakId);
+
             // Sprawdzenie czy utwór jest na Greenliście
             var greenlistEntry = await _context.SongGreenlists.FirstOrDefaultAsync(g => g.SongId == song.Id);
 
@@ -367,26 +374,42 @@ namespace schoolmusic_backend.Services
                     .Where(q => q.BreakId == targetBreakId)
                     .MaxAsync(q => (int?)q.OrderIndex) ?? 0;
 
-                var queueItem = new QueueItem
+                await using var transaction = _context.Database.IsRelational()
+                    ? await _context.Database.BeginTransactionAsync()
+                    : null;
+                QueueItem queueItem;
+                try
                 {
-                    BreakId = targetBreakId,
-                    SongId = song.Id,
-                    UserId = currentUserId,
-                    GreenlistId = greenlistEntry.Id,
-                    ModerationStatus = "approved",
-                    OrderIndex = currentMaxOrder + 1
-                };
+                    queueItem = new QueueItem
+                    {
+                        BreakId = targetBreakId,
+                        SongId = song.Id,
+                        UserId = currentUserId,
+                        GreenlistId = greenlistEntry.Id,
+                        ModerationStatus = "approved",
+                        Status = QueueItemStatuses.Queued,
+                        OrderIndex = currentMaxOrder + 1
+                    };
 
-                _context.QueueItems.Add(queueItem);
-                await _context.SaveChangesAsync();
+                    _context.QueueItems.Add(queueItem);
+                    await _context.SaveChangesAsync();
 
-                var initialVote = new Vote
+                    _context.Votes.Add(new Vote
+                    {
+                        UserId = currentUserId,
+                        QueueItemId = queueItem.Id
+                    });
+                    await _context.SaveChangesAsync();
+
+                    if (transaction != null)
+                        await transaction.CommitAsync();
+                }
+                catch (DbUpdateException ex) when (ex.IsUniqueConstraintViolation())
                 {
-                    UserId = currentUserId,
-                    QueueItemId = queueItem.Id
-                };
-                _context.Votes.Add(initialVote);
-                await _context.SaveChangesAsync();
+                    if (transaction != null)
+                        await transaction.RollbackAsync();
+                    return ServiceResult<object>.Conflict("Ten utwór został już zgłoszony lub kolejka zmieniła się równocześnie. Odśwież kolejkę i spróbuj ponownie.");
+                }
 
                 await BroadcastQueueAsync(targetBreakId);
 
@@ -411,9 +434,8 @@ namespace schoolmusic_backend.Services
 
             // Utwór spoza Greenlisty trafia do Redis do weryfikacji przez moderatorów
             var db = _redis.GetDatabase();
-            var pendingKey = "proposals:pending";
 
-            var existingPending = await db.ListRangeAsync(pendingKey);
+            var existingPending = await db.ListRangeAsync(PendingProposalStore.ListKey);
             foreach (var item in existingPending)
             {
                 if (item.HasValue && item.ToString().Contains($"\"songId\":{song.Id}") && item.ToString().Contains($"\"breakId\":{targetBreakId}"))
@@ -440,7 +462,26 @@ namespace schoolmusic_backend.Services
                 submittedAt = DateTime.UtcNow
             };
 
-            await db.ListRightPushAsync(pendingKey, JsonSerializer.Serialize(proposal));
+            var deduplicationKey = PendingProposalStore.GetDeduplicationKey(targetBreakId, song.Id);
+            var reserved = await db.StringSetAsync(
+                deduplicationKey,
+                proposal.id,
+                expiry: (TimeSpan?)null,
+                when: When.NotExists);
+            if (!reserved)
+            {
+                return ServiceResult<object>.Conflict("Ten utwór już oczekuje na weryfikację przez moderatora na tę przerwę.");
+            }
+
+            try
+            {
+                await db.ListRightPushAsync(PendingProposalStore.ListKey, JsonSerializer.Serialize(proposal));
+            }
+            catch
+            {
+                await db.KeyDeleteAsync(deduplicationKey);
+                throw;
+            }
 
             return ServiceResult<object>.Accepted(new
             {
@@ -477,111 +518,126 @@ namespace schoolmusic_backend.Services
                 return ServiceResult<object>.Forbidden("Twoje konto zostało zablokowane i nie ma uprawnień do głosowania.");
             }
 
-            int targetQueueItemId;
             int targetBreakId;
-
             if (dto.QueueItemId.HasValue)
             {
-                var existingItem = await _context.QueueItems
-                    .Include(q => q.Break)
-                    .FirstOrDefaultAsync(q => q.Id == dto.QueueItemId.Value);
-
-                if (existingItem == null)
-                {
+                var existingBreakId = await _context.QueueItems
+                    .Where(q => q.Id == dto.QueueItemId.Value)
+                    .Select(q => (int?)q.BreakId)
+                    .FirstOrDefaultAsync();
+                if (!existingBreakId.HasValue)
                     return ServiceResult<object>.NotFound("Nie znaleziono pozycji w kolejce o podanym identyfikatorze.");
-                }
-
-                targetQueueItemId = existingItem.Id;
-                targetBreakId = existingItem.BreakId;
+                targetBreakId = existingBreakId.Value;
             }
             else if (dto.SongId.HasValue && dto.BreakId.HasValue)
             {
                 targetBreakId = dto.BreakId.Value;
-
-                var greenlistEntry = await _context.SongGreenlists
-                    .FirstOrDefaultAsync(g => g.SongId == dto.SongId.Value);
-
-                if (greenlistEntry == null)
-                {
-                    return ServiceResult<object>.BadRequest("Ten utwór nie znajduje się na zielonej liście. Możesz go zgłosić do weryfikacji przez moderatora.");
-                }
-
-                var queuedItem = await _context.QueueItems
-                    .FirstOrDefaultAsync(q => q.BreakId == targetBreakId && q.SongId == dto.SongId.Value);
-
-                if (queuedItem != null)
-                {
-                    targetQueueItemId = queuedItem.Id;
-                }
-                else
-                {
-                    // Sprawdzenie cooldownu przed automatycznym dodaniem z Greenlisty
-                    var lastPlayed = await _context.Histories
-                        .Where(h => h.SongId == dto.SongId.Value)
-                        .OrderByDescending(h => h.PlayedAt)
-                        .FirstOrDefaultAsync();
-
-                    if (lastPlayed != null && lastPlayed.PlayedAt > DateTime.UtcNow.AddHours(-SongCooldownHours))
-                    {
-                        var remaining = lastPlayed.PlayedAt.AddHours(SongCooldownHours) - DateTime.UtcNow;
-                        var hours = Math.Max(1, (int)Math.Ceiling(remaining.TotalHours));
-                        return ServiceResult<object>.BadRequest($"Ten utwór był niedawno odtwarzany na radiowęźle ({lastPlayed.PlayedAt:dd.MM HH:mm}). Będzie dostępny za ok. {hours} godz.");
-                    }
-
-                    int currentMaxOrder = await _context.QueueItems
-                        .Where(q => q.BreakId == targetBreakId)
-                        .MaxAsync(q => (int?)q.OrderIndex) ?? 0;
-
-                    var newItem = new QueueItem
-                    {
-                        BreakId = targetBreakId,
-                        SongId = dto.SongId.Value,
-                        UserId = currentUserId,
-                        GreenlistId = greenlistEntry.Id,
-                        ModerationStatus = "approved",
-                        OrderIndex = currentMaxOrder + 1
-                    };
-
-                    _context.QueueItems.Add(newItem);
-                    await _context.SaveChangesAsync();
-                    targetQueueItemId = newItem.Id;
-                }
             }
             else
             {
                 return ServiceResult<object>.BadRequest("Musisz podać QueueItemId lub parę (SongId, BreakId).");
             }
 
-            var breakEntity = await _context.Breaks.FindAsync(targetBreakId);
-            if (breakEntity == null)
+            int targetQueueItemId;
+            int totalVotes;
+            await using (var mutationLock = await _mutationLock.AcquireAsync(targetBreakId))
             {
-                return ServiceResult<object>.NotFound("Przerwa docelowa nie istnieje.");
+                await using var transaction = _context.Database.IsRelational()
+                    ? await _context.Database.BeginTransactionAsync()
+                    : null;
+
+                try
+                {
+                    var breakEntity = await _context.Breaks.FindAsync(targetBreakId);
+                    if (breakEntity == null)
+                        return ServiceResult<object>.NotFound("Przerwa docelowa nie istnieje.");
+
+                    if (IsVotingClosedForBreak(breakEntity, DateTime.Now))
+                        return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę dobiegło już końca.");
+
+                    QueueItem? targetQueueItem;
+                    if (dto.QueueItemId.HasValue)
+                    {
+                        targetQueueItem = await _context.QueueItems
+                            .FirstOrDefaultAsync(q => q.Id == dto.QueueItemId.Value && q.BreakId == targetBreakId);
+                    }
+                    else
+                    {
+                        var songId = dto.SongId!.Value;
+                        var greenlistEntry = await _context.SongGreenlists
+                            .FirstOrDefaultAsync(g => g.SongId == songId);
+                        if (greenlistEntry == null)
+                        {
+                            return ServiceResult<object>.BadRequest("Ten utwór nie znajduje się na zielonej liście. Możesz go zgłosić do weryfikacji przez moderatora.");
+                        }
+
+                        targetQueueItem = await _context.QueueItems
+                            .FirstOrDefaultAsync(q => q.BreakId == targetBreakId && q.SongId == songId);
+                        if (targetQueueItem == null)
+                        {
+                            // Sprawdzenie cooldownu przed automatycznym dodaniem z Greenlisty
+                            var lastPlayed = await _context.Histories
+                                .Where(h => h.SongId == songId)
+                                .OrderByDescending(h => h.PlayedAt)
+                                .FirstOrDefaultAsync();
+
+                            if (lastPlayed != null && lastPlayed.PlayedAt > DateTime.UtcNow.AddHours(-SongCooldownHours))
+                            {
+                                var remaining = lastPlayed.PlayedAt.AddHours(SongCooldownHours) - DateTime.UtcNow;
+                                var hours = Math.Max(1, (int)Math.Ceiling(remaining.TotalHours));
+                                return ServiceResult<object>.BadRequest($"Ten utwór był niedawno odtwarzany na radiowęźle ({lastPlayed.PlayedAt:dd.MM HH:mm}). Będzie dostępny za ok. {hours} godz.");
+                            }
+
+                            int currentMaxOrder = await _context.QueueItems
+                                .Where(q => q.BreakId == targetBreakId)
+                                .MaxAsync(q => (int?)q.OrderIndex) ?? 0;
+                            targetQueueItem = new QueueItem
+                            {
+                                BreakId = targetBreakId,
+                                SongId = songId,
+                                UserId = currentUserId,
+                                GreenlistId = greenlistEntry.Id,
+                                ModerationStatus = "approved",
+                                Status = QueueItemStatuses.Queued,
+                                OrderIndex = currentMaxOrder + 1
+                            };
+                            _context.QueueItems.Add(targetQueueItem);
+                            await _context.SaveChangesAsync();
+                        }
+                    }
+
+                    if (targetQueueItem == null)
+                        return ServiceResult<object>.NotFound("Nie znaleziono pozycji w kolejce o podanym identyfikatorze.");
+                    if (targetQueueItem.Status != QueueItemStatuses.Queued ||
+                        (targetQueueItem.ModerationStatus != "approved" && targetQueueItem.ModerationStatus != null))
+                    {
+                        return ServiceResult<object>.BadRequest("Głos można oddać wyłącznie na zatwierdzony utwór oczekujący w kolejce.");
+                    }
+
+                    targetQueueItemId = targetQueueItem.Id;
+                    bool alreadyVoted = await _context.Votes
+                        .AnyAsync(v => v.UserId == currentUserId && v.QueueItemId == targetQueueItemId);
+                    if (alreadyVoted)
+                        return ServiceResult<object>.Conflict("Już oddałeś głos na ten utwór! Nie możesz zagłosować dwukrotnie.");
+
+                    _context.Votes.Add(new Vote
+                    {
+                        UserId = currentUserId,
+                        QueueItemId = targetQueueItemId
+                    });
+                    await _context.SaveChangesAsync();
+
+                    if (transaction != null)
+                        await transaction.CommitAsync();
+                    totalVotes = await _context.Votes.CountAsync(v => v.QueueItemId == targetQueueItemId);
+                }
+                catch (DbUpdateException ex) when (ex.IsUniqueConstraintViolation())
+                {
+                    if (transaction != null)
+                        await transaction.RollbackAsync();
+                    return ServiceResult<object>.Conflict("Głos został już oddany lub kolejka zmieniła się równocześnie. Odśwież dane i spróbuj ponownie.");
+                }
             }
-
-            var now = DateTime.Now;
-            if (IsVotingClosedForBreak(breakEntity, now))
-            {
-                return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę dobiegło już końca.");
-            }
-
-            bool alreadyVoted = await _context.Votes
-                .AnyAsync(v => v.UserId == currentUserId && v.QueueItemId == targetQueueItemId);
-
-            if (alreadyVoted)
-            {
-                return ServiceResult<object>.Conflict("Już oddałeś głos na ten utwór! Nie możesz zagłosować dwukrotnie.");
-            }
-
-            var vote = new Vote
-            {
-                UserId = currentUserId,
-                QueueItemId = targetQueueItemId
-            };
-
-            _context.Votes.Add(vote);
-            await _context.SaveChangesAsync();
-
-            int totalVotes = await _context.Votes.CountAsync(v => v.QueueItemId == targetQueueItemId);
 
             await BroadcastQueueAsync(targetBreakId);
 
@@ -602,23 +658,31 @@ namespace schoolmusic_backend.Services
         /// queueItemId, votesCount, hasVoted) po pomyślnym usunięciu</returns>
         public async Task<ServiceResult<object>> RemoveVoteAsync(int queueItemId, int currentUserId)
         {
-            var vote = await _context.Votes
-                .Include(v => v.QueueItem)
-                .FirstOrDefaultAsync(v => v.UserId == currentUserId && v.QueueItemId == queueItemId);
-
-            if (vote == null)
-            {
+            var breakId = await _context.QueueItems
+                .Where(item => item.Id == queueItemId)
+                .Select(item => (int?)item.BreakId)
+                .FirstOrDefaultAsync();
+            if (!breakId.HasValue)
                 return ServiceResult<object>.NotFound("Nie oddałeś głosu na ten utwór lub został on już cofnięty.");
+
+            int remainingVotes;
+            await using (var mutationLock = await _mutationLock.AcquireAsync(breakId.Value))
+            {
+                var vote = await _context.Votes
+                    .Include(v => v.QueueItem)
+                    .ThenInclude(item => item.Break)
+                    .FirstOrDefaultAsync(v => v.UserId == currentUserId && v.QueueItemId == queueItemId);
+                if (vote == null)
+                    return ServiceResult<object>.NotFound("Nie oddałeś głosu na ten utwór lub został on już cofnięty.");
+                if (vote.QueueItem.Status != QueueItemStatuses.Queued || IsVotingClosedForBreak(vote.QueueItem.Break, DateTime.Now))
+                    return ServiceResult<object>.BadRequest("Nie można cofnąć głosu po zamknięciu głosowania lub rozpoczęciu odtwarzania utworu.");
+
+                _context.Votes.Remove(vote);
+                await _context.SaveChangesAsync();
+                remainingVotes = await _context.Votes.CountAsync(v => v.QueueItemId == queueItemId);
             }
 
-            int breakId = vote.QueueItem.BreakId;
-
-            _context.Votes.Remove(vote);
-            await _context.SaveChangesAsync();
-
-            int remainingVotes = await _context.Votes.CountAsync(v => v.QueueItemId == queueItemId);
-
-            await BroadcastQueueAsync(breakId);
+            await BroadcastQueueAsync(breakId.Value);
 
             return ServiceResult<object>.Ok(new
             {
@@ -638,83 +702,81 @@ namespace schoolmusic_backend.Services
         /// gdy przerwa nie istnieje)</returns>
         public async Task<ServiceResult<object>> ArchiveBreakAsync(int breakId)
         {
-            var breakEntity = await _context.Breaks.FindAsync(breakId);
-            if (breakEntity == null)
-            {
-                // Fallback: jeśli podana przerwa nie istnieje, spróbuj użyć pierwszej dostępnej
-                breakEntity = await _context.Breaks.OrderBy(b => b.BreakNumber).FirstOrDefaultAsync();
-                if (breakEntity == null)
-                {
-                    return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
-                }
-                breakId = breakEntity.Id;
-            }
-
-            // Pobieramy wszystkie zatwierdzone pozycje z kolejki tej przerwy
-            var approvedQueueItems = await _context.QueueItems
-                .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
-                .Include(q => q.Song)
-                    .ThenInclude(s => s.Artist)
-                .Include(q => q.Votes)
-                .ToListAsync();
-
-            var now = DateTime.UtcNow;
+            sbyte breakNumber;
             var playedTracksInfo = new List<object>();
+            var totalClearedTracks = 0;
 
-            var playedItems = approvedQueueItems
-                .Where(item => item.Status == "played" || item.Status == "playing")
-                .ToList();
-
-            // Queue status is updated from Spotify playback polling; archive only tracks that actually started.
-            foreach (var played in playedItems)
+            await using (var mutationLock = await _mutationLock.AcquireAsync(breakId))
             {
-                var historyEntry = new History
+                var breakEntity = await _context.Breaks.FindAsync(breakId);
+                if (breakEntity == null)
+                    return ServiceResult<object>.NotFound("Nie znaleziono przerwy o podanym identyfikatorze.");
+                breakNumber = breakEntity.BreakNumber;
+
+                await using var transaction = _context.Database.IsRelational()
+                    ? await _context.Database.BeginTransactionAsync()
+                    : null;
+
+                // Pobieramy wszystkie zatwierdzone pozycje z kolejki tej przerwy
+                var approvedQueueItems = await _context.QueueItems
+                    .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
+                    .Include(q => q.Song)
+                        .ThenInclude(s => s.Artist)
+                    .Include(q => q.Votes)
+                    .ToListAsync();
+                var playedItems = approvedQueueItems
+                    .Where(item => item.Status == QueueItemStatuses.Played || item.Status == QueueItemStatuses.Playing)
+                    .ToList();
+
+                // Status kolejki jest aktualizowany przez odpytywanie Spotify; archiwizujemy tylko rozpoczęte utwory.
+                var now = DateTime.UtcNow;
+                foreach (var played in playedItems)
                 {
-                    SongId = played.SongId,
-                    BreakId = breakId,
-                    PlayedAt = now,
-                    Votes = played.Votes.Count
-                };
-                _context.Histories.Add(historyEntry);
+                    _context.Histories.Add(new History
+                    {
+                        SongId = played.SongId,
+                        BreakId = breakId,
+                        PlayedAt = now,
+                        Votes = played.Votes.Count
+                    });
 
-                playedTracksInfo.Add(new
-                {
-                    songId = played.SongId,
-                    title = played.Song.Title,
-                    artist = played.Song.Artist?.Name ?? "Nieznany wykonawca",
-                    votes = played.Votes.Count
-                });
+                    playedTracksInfo.Add(new
+                    {
+                        songId = played.SongId,
+                        title = played.Song.Title,
+                        artist = played.Song.Artist?.Name ?? "Nieznany wykonawca",
+                        votes = played.Votes.Count
+                    });
+                }
+
+                // Usuwamy wszystkie QueueItems i powiązane głosy dla tej przerwy (czyścimy kolejkę)
+                var allBreakQueueItems = await _context.QueueItems
+                    .Where(q => q.BreakId == breakId)
+                    .Include(q => q.Votes)
+                    .ToListAsync();
+                totalClearedTracks = allBreakQueueItems.Count;
+
+                var allVotes = allBreakQueueItems.SelectMany(q => q.Votes).ToList();
+                if (allVotes.Count > 0)
+                    _context.Votes.RemoveRange(allVotes);
+                if (allBreakQueueItems.Count > 0)
+                    _context.QueueItems.RemoveRange(allBreakQueueItems);
+
+                await _context.SaveChangesAsync();
+                if (transaction != null)
+                    await transaction.CommitAsync();
             }
-
-            // Usuwamy wszystkie QueueItems i powiązane głosy dla tej przerwy (czyścimy kolejkę)
-            var allBreakQueueItems = await _context.QueueItems
-                .Where(q => q.BreakId == breakId)
-                .Include(q => q.Votes)
-                .ToListAsync();
-
-            var allVotes = allBreakQueueItems.SelectMany(q => q.Votes).ToList();
-            if (allVotes.Count > 0)
-            {
-                _context.Votes.RemoveRange(allVotes);
-            }
-
-            if (allBreakQueueItems.Count > 0)
-            {
-                _context.QueueItems.RemoveRange(allBreakQueueItems);
-            }
-
-            await _context.SaveChangesAsync();
 
             // Rozsyłamy powiadomienie SignalR (kolejka jest teraz wyczyszczona)
             await BroadcastQueueAsync(breakId);
 
             return ServiceResult<object>.Ok(new
             {
-                Message = $"Przerwa #{breakEntity.BreakNumber} została pomyślnie zarchiwizowana. Zapisano historię i wyczyszczono kolejkę.",
-                breakId = breakEntity.Id,
-                breakNumber = breakEntity.BreakNumber,
+                Message = $"Przerwa #{breakNumber} została pomyślnie zarchiwizowana. Zapisano historię i wyczyszczono kolejkę.",
+                breakId,
+                breakNumber,
                 archivedTracksCount = playedTracksInfo.Count,
-                totalClearedTracks = allBreakQueueItems.Count,
+                totalClearedTracks,
                 archivedTracks = playedTracksInfo
             });
         }

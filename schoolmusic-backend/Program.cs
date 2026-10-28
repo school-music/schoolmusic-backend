@@ -161,6 +161,7 @@ builder.Services.AddSignalR();
 builder.Services.AddScoped<IBreakService, BreakService>();
 builder.Services.AddScoped<IRadioStatusService, RadioStatusService>();
 builder.Services.AddScoped<IQueueService, QueueService>();
+builder.Services.AddSingleton<IQueueMutationLock, QueueMutationLock>();
 builder.Services.AddScoped<IRankingsService, RankingsService>();
 builder.Services.AddSingleton<IAudioPlayerService, AudioPlayerService>();
 builder.Services.AddSingleton<ISpotifyConnectPlaybackService, SpotifyConnectPlaybackService>();

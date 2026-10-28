@@ -97,15 +97,12 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
 
         if (current == null) return false;
         var item = await db.QueueItems.FindAsync(current.QueueItemId);
-        if (item != null)
-        {
-            item.Status = "skipped";
-            await db.SaveChangesAsync();
-        }
+        if (item == null || !QueueItemStatuses.TryTransition(item, QueueItemStatuses.Skipped))
+            return false;
+        await db.SaveChangesAsync();
 
         await spotify.SkipToNextAsync();
-        if (item != null)
-            await scope.ServiceProvider.GetRequiredService<IQueueService>().BroadcastQueueAsync(item.BreakId);
+        await scope.ServiceProvider.GetRequiredService<IQueueService>().BroadcastQueueAsync(item.BreakId);
         return true;
     }
 
@@ -327,7 +324,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                         SongId = defaultSong.SongId,
                         Song = defaultSong.Song,
                         ModerationStatus = "approved",
-                        Status = "queued",
+                        Status = QueueItemStatuses.Queued,
                         OrderIndex = nextOrder++,
                         CreatedAt = now
                     });
@@ -350,7 +347,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                     !IsSpotifyTrackId(item.Song.SpotifyId))
                 {
                     if (queueById.TryGetValue(scheduled.QueueItemId, out item))
-                        item.Status = "skipped";
+                        QueueItemStatuses.TryTransition(item, QueueItemStatuses.Skipped);
                     continue;
                 }
 
@@ -421,10 +418,10 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             if (skippedQueueItemIds.Length > 0)
             {
                 var skippedItems = await db.QueueItems
-                    .Where(item => skippedQueueItemIds.Contains(item.Id) && item.Status == "queued")
+                    .Where(item => skippedQueueItemIds.Contains(item.Id) && item.Status == QueueItemStatuses.Queued)
                     .ToListAsync(cancellationToken);
                 foreach (var item in skippedItems)
-                    item.Status = "skipped";
+                    QueueItemStatuses.TryTransition(item, QueueItemStatuses.Skipped);
                 await db.SaveChangesAsync(cancellationToken);
                 await queueService.BroadcastQueueAsync(_activeBreakId ?? 0);
             }
@@ -501,26 +498,24 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         var firstUnobserved = _lastPlayingTrackIndex < 0 ? 0 : _lastPlayingTrackIndex + 1;
         for (var index = firstUnobserved; index < currentIndex; index++)
         {
-            if (items.TryGetValue(_spotifyTracks[index].QueueItemId, out var skipped) && skipped.Status == "queued")
+            if (items.TryGetValue(_spotifyTracks[index].QueueItemId, out var skipped) &&
+                QueueItemStatuses.TryTransition(skipped, QueueItemStatuses.Skipped))
             {
-                skipped.Status = "skipped";
                 changed = true;
             }
         }
         if (_lastPlayingTrackIndex >= 0 && _lastPlayingTrackIndex < currentIndex &&
             items.TryGetValue(_spotifyTracks[_lastPlayingTrackIndex].QueueItemId, out var finished) &&
-            finished.Status == "playing")
+            QueueItemStatuses.TryTransition(finished, QueueItemStatuses.Played))
         {
-            finished.Status = "played";
             changed = true;
         }
 
         var current = _spotifyTracks[currentIndex];
         if (items.TryGetValue(current.QueueItemId, out var playing))
         {
-            if (playing.Status != "playing")
+            if (QueueItemStatuses.TryTransition(playing, QueueItemStatuses.Playing))
             {
-                playing.Status = "playing";
                 changed = true;
             }
         }

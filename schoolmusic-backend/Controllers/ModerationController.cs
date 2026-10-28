@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.SignalR;
 using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Hubs;
+using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers
 {
@@ -23,12 +24,19 @@ namespace schoolmusic_backend.Controllers
         private readonly schoolmusicContext _context;
         private readonly IConnectionMultiplexer _redis;
         private readonly IHubContext<QueueHub> _hubContext;
+        private readonly IQueueMutationLock _mutationLock;
+        private static readonly IQueueMutationLock DefaultMutationLock = new QueueMutationLock();
 
-        public ModerationController(schoolmusicContext context, IConnectionMultiplexer redis, IHubContext<QueueHub> hubContext)
+        public ModerationController(
+            schoolmusicContext context,
+            IConnectionMultiplexer redis,
+            IHubContext<QueueHub> hubContext,
+            IQueueMutationLock? mutationLock = null)
         {
             _context = context;
             _redis = redis;
             _hubContext = hubContext;
+            _mutationLock = mutationLock ?? DefaultMutationLock;
         }
         /// <summary>
         /// Reprezentuje propozycję utworu przesłaną przez użytkownika.
@@ -108,6 +116,7 @@ namespace schoolmusic_backend.Controllers
 
         public record AddSongToBlacklistDto(int? SongId, int? ArtistId);
         public record AddSongToGreenlistDto(int SongId);
+        private sealed record ApprovedProposalResult(QueueItem QueueItem, Song Song);
 
         private static readonly JsonSerializerOptions _jsonOptions = new()
         {
@@ -123,7 +132,7 @@ namespace schoolmusic_backend.Controllers
         public async Task<IActionResult> GetAllPendingSongs()
         {
             var db = _redis.GetDatabase();
-            string pendingKey = "proposals:pending";
+            string pendingKey = PendingProposalStore.ListKey;
 
             RedisValue[] pendingSongs = await db.ListRangeAsync(pendingKey);
 
@@ -172,7 +181,7 @@ namespace schoolmusic_backend.Controllers
             }
 
             var db = _redis.GetDatabase();
-            string pendingKey = "proposals:pending";
+            string pendingKey = PendingProposalStore.ListKey;
             RedisValue[] pendingSongs = await db.ListRangeAsync(pendingKey);
 
             SongProposalDto? matchingProposal = null;
@@ -203,94 +212,21 @@ namespace schoolmusic_backend.Controllers
                 return NotFound(new { Message = "Nie znaleziono propozycji o podanym identyfikatorze." });
             }
 
-            var moderator = await _context.Moderators.FirstOrDefaultAsync(m => m.UserId == modUserId);
-            if (moderator == null)
-            {
-                moderator = new Moderator
-                {
-                    UserId = modUserId,
-                    SongsApproved = 0,
-                    SongsBanned = 0,
-                    ArtistsBanned = 0
-                };
-                _context.Moderators.Add(moderator);
-                await _context.SaveChangesAsync();
-            }
+            await using var mutationLock = await _mutationLock.AcquireAsync(matchingProposal.BreakId);
+            var stillPending = (await db.ListRangeAsync(pendingKey)).Any(value => value == matchingRedisValue);
+            if (!stillPending)
+                return NotFound(new { Message = "Propozycja została już obsłużona przez innego moderatora." });
 
-            int songId = matchingProposal.SongId;
+            var approval = await ApproveProposalInDatabaseAsync(matchingProposal, modUserId);
+            if (!approval.Success || approval.Data == null)
+                return StatusCode(approval.StatusCode, new { Message = approval.Message });
+
+            var queueItem = approval.Data.QueueItem;
+            var song = approval.Data.Song;
             int breakId = matchingProposal.BreakId;
-            int proposingUserId = matchingProposal.UserId;
-
-            var song = await _context.Songs.Include(s => s.Artist).FirstOrDefaultAsync(s => s.Id == songId);
-            if (song == null)
-            {
-                return NotFound(new { Message = "Piosenka powiązana z propozycją nie istnieje w bazie danych." });
-            }
-
-            var greenlistEntry = await _context.SongGreenlists.FirstOrDefaultAsync(g => g.SongId == song.Id);
-            if (greenlistEntry == null)
-            {
-                greenlistEntry = new SongGreenlist
-                {
-                    SongId = song.Id,
-                    ArtistId = song.ArtistId,
-                    ModId = moderator.Id
-                };
-                _context.SongGreenlists.Add(greenlistEntry);
-                await _context.SaveChangesAsync();
-            }
-
-            int currentMaxOrder = await _context.QueueItems
-                .Where(q => q.BreakId == breakId)
-                .MaxAsync(q => (int?)q.OrderIndex) ?? 0;
-
-            var existingQueueItem = await _context.QueueItems
-                .FirstOrDefaultAsync(q => q.BreakId == breakId && q.SongId == song.Id);
-
-            QueueItem queueItem;
-            if (existingQueueItem == null)
-            {
-                queueItem = new QueueItem
-                {
-                    BreakId = breakId,
-                    SongId = song.Id,
-                    UserId = proposingUserId,
-                    GreenlistId = greenlistEntry.Id,
-                    ModeratorId = moderator.Id,
-                    ModerationStatus = "approved",
-                    Status = "queued",
-                    CreatedAt = DateTime.UtcNow,
-                    OrderIndex = currentMaxOrder + 1
-                };
-                _context.QueueItems.Add(queueItem);
-                await _context.SaveChangesAsync();
-            }
-            else
-            {
-                queueItem = existingQueueItem;
-                queueItem.ModerationStatus = "approved";
-                queueItem.ModeratorId = moderator.Id;
-                queueItem.GreenlistId = greenlistEntry.Id;
-                await _context.SaveChangesAsync();
-            }
-
-            bool alreadyVoted = await _context.Votes
-                .AnyAsync(v => v.UserId == proposingUserId && v.QueueItemId == queueItem.Id);
-
-            if (!alreadyVoted)
-            {
-                _context.Votes.Add(new Vote
-                {
-                    UserId = proposingUserId,
-                    QueueItemId = queueItem.Id
-                });
-                await _context.SaveChangesAsync();
-            }
 
             await db.ListRemoveAsync(pendingKey, matchingRedisValue, 1);
-
-            moderator.SongsApproved += 1;
-            await _context.SaveChangesAsync();
+            await db.KeyDeleteAsync(PendingProposalStore.GetDeduplicationKey(breakId, song.Id));
 
             // Powiadamiamy wszystkich podłączonych do tej przerwy o nowej zatwierdzonej piosence
             // poprzez SignalR i aktualizujemy kolejkę w czasie rzeczywistym
@@ -353,7 +289,7 @@ namespace schoolmusic_backend.Controllers
             }
 
             var db = _redis.GetDatabase();
-            string pendingKey = "proposals:pending";
+            string pendingKey = PendingProposalStore.ListKey;
             RedisValue[] pendingSongs = await db.ListRangeAsync(pendingKey);
 
             SongProposalDto? matchingProposal = null;
@@ -384,7 +320,15 @@ namespace schoolmusic_backend.Controllers
                 return NotFound(new { Message = "Nie znaleziono propozycji o podanym identyfikatorze." });
             }
 
+            await using var mutationLock = await _mutationLock.AcquireAsync(matchingProposal.BreakId);
+            var stillPending = (await db.ListRangeAsync(pendingKey)).Any(value => value == matchingRedisValue);
+            if (!stillPending)
+                return NotFound(new { Message = "Propozycja została już obsłużona przez innego moderatora." });
+
             await db.ListRemoveAsync(pendingKey, matchingRedisValue, 1);
+            await db.KeyDeleteAsync(PendingProposalStore.GetDeduplicationKey(
+                matchingProposal.BreakId,
+                matchingProposal.SongId));
 
             bool blacklisted = false;
             if (addToBlacklist)
@@ -983,6 +927,110 @@ namespace schoolmusic_backend.Controllers
                 GreenlistId = entry.Id,
                 SongId = entry.SongId
             });
+        }
+
+        private async Task<ServiceResult<ApprovedProposalResult>> ApproveProposalInDatabaseAsync(
+            SongProposalDto proposal,
+            int modUserId)
+        {
+            await using var transaction = _context.Database.IsRelational()
+                ? await _context.Database.BeginTransactionAsync()
+                : null;
+
+            try
+            {
+                if (!await _context.Breaks.AnyAsync(item => item.Id == proposal.BreakId))
+                    return ServiceResult<ApprovedProposalResult>.NotFound("Przerwa powiązana z propozycją nie istnieje.");
+
+                var moderator = await _context.Moderators.FirstOrDefaultAsync(item => item.UserId == modUserId);
+                if (moderator == null)
+                {
+                    moderator = new Moderator
+                    {
+                        UserId = modUserId,
+                        SongsApproved = 0,
+                        SongsBanned = 0,
+                        ArtistsBanned = 0
+                    };
+                    _context.Moderators.Add(moderator);
+                    await _context.SaveChangesAsync();
+                }
+
+                var song = await _context.Songs
+                    .Include(item => item.Artist)
+                    .FirstOrDefaultAsync(item => item.Id == proposal.SongId);
+                if (song == null)
+                    return ServiceResult<ApprovedProposalResult>.NotFound("Piosenka powiązana z propozycją nie istnieje w bazie danych.");
+
+                var greenlistEntry = await _context.SongGreenlists.FirstOrDefaultAsync(item => item.SongId == song.Id);
+                if (greenlistEntry == null)
+                {
+                    greenlistEntry = new SongGreenlist
+                    {
+                        SongId = song.Id,
+                        ArtistId = song.ArtistId,
+                        ModId = moderator.Id
+                    };
+                    _context.SongGreenlists.Add(greenlistEntry);
+                    await _context.SaveChangesAsync();
+                }
+
+                var queueItem = await _context.QueueItems
+                    .FirstOrDefaultAsync(item => item.BreakId == proposal.BreakId && item.SongId == song.Id);
+                if (queueItem == null)
+                {
+                    int currentMaxOrder = await _context.QueueItems
+                        .Where(item => item.BreakId == proposal.BreakId)
+                        .MaxAsync(item => (int?)item.OrderIndex) ?? 0;
+                    queueItem = new QueueItem
+                    {
+                        BreakId = proposal.BreakId,
+                        SongId = song.Id,
+                        UserId = proposal.UserId,
+                        GreenlistId = greenlistEntry.Id,
+                        ModeratorId = moderator.Id,
+                        ModerationStatus = "approved",
+                        Status = QueueItemStatuses.Queued,
+                        CreatedAt = DateTime.UtcNow,
+                        OrderIndex = currentMaxOrder + 1
+                    };
+                    _context.QueueItems.Add(queueItem);
+                    await _context.SaveChangesAsync();
+                }
+                else
+                {
+                    if (queueItem.Status != QueueItemStatuses.Queued)
+                        return ServiceResult<ApprovedProposalResult>.Conflict("Pozycja kolejki została już rozpoczęta lub zakończona.");
+                    queueItem.ModerationStatus = "approved";
+                    queueItem.ModeratorId = moderator.Id;
+                    queueItem.GreenlistId = greenlistEntry.Id;
+                }
+
+                bool alreadyVoted = await _context.Votes
+                    .AnyAsync(item => item.UserId == proposal.UserId && item.QueueItemId == queueItem.Id);
+                if (!alreadyVoted)
+                {
+                    _context.Votes.Add(new Vote
+                    {
+                        UserId = proposal.UserId,
+                        QueueItemId = queueItem.Id
+                    });
+                }
+
+                moderator.SongsApproved += 1;
+                await _context.SaveChangesAsync();
+                if (transaction != null)
+                    await transaction.CommitAsync();
+
+                return ServiceResult<ApprovedProposalResult>.Ok(new ApprovedProposalResult(queueItem, song));
+            }
+            catch (DbUpdateException ex) when (ex.IsUniqueConstraintViolation())
+            {
+                if (transaction != null)
+                    await transaction.RollbackAsync();
+                return ServiceResult<ApprovedProposalResult>.Conflict(
+                    "Propozycja została równocześnie obsłużona lub kolejka uległa zmianie. Odśwież dane i spróbuj ponownie.");
+            }
         }
     }
 }
