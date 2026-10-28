@@ -14,7 +14,7 @@
 | **0:00 - 1:30** | 1. Pomysł i cel projektu | Lider / Speaker | Dlaczego radiowęzły w szkołach nie działają i jak to zmieniamy. |
 | **1:30 - 3:00** | 2. Architektura systemu | Architekt / Backend | Trzy filary: .NET 10 API, Redis (cache/kolejki), MariaDB (dane trwał). |
 | **3:00 - 4:30** | 3. Projekt bazy danych | Baza danych / Backend | Relacje, ograniczenia integralności, optymalizacja zapytań. |
-| **4:30 - 6:00** | 4. Aplikacja serwerowa (Backend) | Główny programista | .NET 10, C# 14, bezpieczeństwo JWT, SignalR, 149 testów jednostkowych. |
+| **4:30 - 6:00** | 4. Aplikacja serwerowa (Backend) | Główny programista | .NET 10, C# 14, bezpieczeństwo JWT, SignalR, 240 testów jednostkowych. |
 | **6:00 - 7:30** | 5. Panel administracyjny WWW | Frontend / Web dev | Pełna kontrola dla dyrekcji i radiowęzłowców (dźwięk, plany, blokady). |
 | **7:30 - 9:00** | 6. Aplikacja mobilna | Mobile dev | Narzędzie w rękach ucznia: szybkie głosowanie, podgląd na żywo. |
 | **9:00 - 10:30**| 7. Mechanizm głosowania | Backend dev | Demokratyczny algorytm rankingowy, anty-spam, cooldown 24h. |
@@ -132,7 +132,7 @@ Backend został zaimplementowany przy użyciu platformy **.NET 10** z zachowanie
   * `mod`: moderator (zatwierdzanie/odrzucanie propozycji, blokowanie spamerów).
   * `admin`: radiowęzłowiec (pełna kontrola playbacku, głośności, harmonogramu).
   * `head_admin`: administrator systemu (zarządzanie kontami i konfiguracją).
-* **Automatyczne testy jakościowe:** 149 testów jednostkowych i integracyjnych (xUnit, Moq, InMemoryDatabase), weryfikujących logikę harmonogramu, moderację, kolejkowanie i bezpieczeństwo.
+* **Automatyczne testy jakościowe:** 240 testów jednostkowych i integracyjnych (xUnit, Moq, InMemoryDatabase), weryfikujących logikę harmonogramu, moderację, kolejkowanie i bezpieczeństwo.
 
 ---
 
@@ -183,12 +183,14 @@ Harmonogram przerw odpowiada za bezwzględne przestrzeganie dyscypliny czasu lek
 * **Dni Wyjątkowe (`ExceptionDay`):** Pełne wyciszenie muzyki na cały dzień (np. egzaminy ósmoklasisty, matury, żałoba narodowa).
 * **Przerwy Wyjątkowe (`ExceptionBreak`):** Wyciszenie konkretnej pojedynczej przerwy (np. uroczysty apel, akademia w auli).
 * **Zabezpieczenie przed dzwonkiem:** Głosowanie zamyka się na minutę przed przerwą (`VoteEnds = StartAt - 1 min`), co daje serwisowi czas na optymalne przeliczenie kolejki przed dzwonkiem.
+* **Jawna strefa czasowa szkoły:** Harmonogram i wydarzenia używają `School__TimeZone` (domyślnie `Europe/Warsaw`), niezależnie od strefy systemu kontenera. Znaczniki techniczne (głosy, historia, stan odtwarzania) są zapisywane w UTC.
+* **Jedna instancja sterująca:** Automatyczne odtwarzanie uruchamia tylko instancja z `Scheduler__Enabled=true`. Dodatkowe repliki API powinny mieć tę opcję wyłączoną.
 
 ---
 
 ## 9. Kolejka odtwarzania
 
-Serwis [`BreakService`](file:///C:/Users/Szymon/Desktop/schoolmusic/schoolmusic-backend/schoolmusic-backend/Services/BreakService.cs) implementuje dedykowany algorytm selekcji utworów:
+Serwis [`BreakService`](../schoolmusic-backend/Services/BreakService.cs) implementuje dedykowany algorytm selekcji utworów:
 
 ```mermaid
 flowchart TD
@@ -234,6 +236,6 @@ SchoolMusic obsługuje dwa komplementarne silniki odtwarzania dźwięku:
 | Częste pytanie komisji | Odpowiedź zespołu SchoolMusic |
 | :--- | :--- |
 | **"Co jeśli internet przestanie działać?"** | System posiada lokalny silnik LibVLCSharp oraz bazę `DefaultSongs` na dysku – dzwonki i muzyka lokalna działają bez sieci. |
-| **"Czy uczeń może 'zhakować' głosy botem?"** | Głosowanie wymaga konta JWT, weryfikuje unikalność w bazie, a w Redis działa ogranicznik zapytań (Rate Limiting). |
+| **"Czy uczeń może 'zhakować' głosy botem?"** | Głosowanie wymaga konta JWT, a unikalność głosu wymusza indeks bazy danych. Operacje tej samej przerwy są serializowane, a równoległy zapis kończy się kontrolowanym błędem 409 zamiast zdublowanym głosem. |
 | **"Co jeśli dzwonek zadzwoni w połowie piosenki?"** | Algorytm `BreakService` precyzyjnie planuje utwory na długość przerwy, a serwis tła wycisza dźwięk (fade-out) dokładnie z sekundą zakończenia przerwy. |
-| **"Jak łatwo wdrożyć to w innej szkole?"** | Wdrożenie sprowadza się do jednej komendy `docker compose up -d`. Całość wstaje w 30 sekund z gotową bazą i kontami. |
+| **"Jak łatwo wdrożyć to w innej szkole?"** | Wdrożenie sprowadza się do uzupełnienia `.env` i uruchomienia `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d`. Całość wstaje z gotową bazą i kontami demonstracyjnymi. |

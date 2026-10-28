@@ -14,6 +14,7 @@
 ## Spis treści
 - [O projekcie](#-o-projekcie)
 - [Główne funkcjonalności](#-główne-funkcjonalności)
+- [Architektura i przepływ](#-architektura-i-przepływ)
 - [Technologie](#-stos-technologiczny)
 - [Szybki start (Środowisko demonstracyjne)](#-szybki-start-środowisko-demonstracyjne)
 - [Domyślne konta testowe](#-domyślne-konta-testowe)
@@ -49,6 +50,35 @@ W wielu szkołach radiowęzeł jest obsługiwany ręcznie przez pojedyncze osoby
 
 ---
 
+## Architektura i przepływ
+
+```mermaid
+flowchart LR
+    Uczen[Uczeń / panel WWW] -->|HTTPS + JWT| API[ASP.NET Core Web API]
+    API --> MariaDB[(MariaDB)]
+    API --> Redis[(Redis)]
+    API -->|SignalR| Klienci[Klienci czasu rzeczywistego]
+    Scheduler[Scheduler przerw] -->|Spotify Connect| Spotify[Spotify]
+    Scheduler -->|LibVLC| Audio[Lokalny radiowęzeł]
+    Scheduler --> MariaDB
+```
+
+Scheduler działa w procesie API jako usługa w tle. Odczytuje harmonogram i kolejkę z MariaDB, a stan
+odtwarzania utrzymuje w `PlaybackState`. Redis przechowuje cache statystyk oraz kolejkę propozycji oczekujących
+na moderację. Klienci otrzymują zmiany kolejki i statusu przez SignalR.
+
+### Macierz ról i endpointów
+
+| Obszar | `user` | `mod` | `admin` | `head_admin` |
+| :--- | :---: | :---: | :---: | :---: |
+| Logowanie, profil, ulubione | ✔ | ✔ | ✔ | ✔ |
+| Zgłaszanie i głosowanie | ✔ | ✔ | ✔ | ✔ |
+| Panel moderacji i Greenlista | – | ✔ | ✔ | ✔ |
+| Sterowanie odtwarzaniem i harmonogramem | – | – | ✔ | ✔ |
+| Zarządzanie użytkownikami i konfiguracją | – | – | – | ✔ |
+
+---
+
 ## Wykorzystane technologie
 
 | Warstwa | Technologia | Opis |
@@ -60,7 +90,7 @@ W wielu szkołach radiowęzeł jest obsługiwany ręcznie przez pojedyncze osoby
 | **Silnik Audio** | `SpotifyAPI.Web` / `LibVLCSharp` | Hybrydowe sterowanie Spotify Connect oraz lokalny silnik VLC |
 | **Dokumentacja API** | `OpenAPI` + `Scalar.AspNetCore` | Nowoczesny, interaktywny interfejs testowania endpointów REST |
 | **Konteneryzacja** | `Docker & Docker Compose` | Zapewnia powtarzalność i start całego stosu jedną komendą |
-| **Testy i Jakość** | `xUnit`, `Moq`, `FluentAssertions` | Zestaw 183 testów jednostkowych i integracyjnych |
+| **Testy i Jakość** | `xUnit`, `Moq`, `FluentAssertions` | Zestaw 240 testów jednostkowych i integracyjnych |
 | **CI/CD** | `GitHub Actions` | Automatyczna budowa, testy pokrycia kodu i weryfikacja Dockera |
 
 ---
@@ -96,6 +126,19 @@ Aby zatrzymać środowisko:
 docker compose down
 ```
 
+Aby wykonać czystą instalację (usunięcie bazy, cache Redis i nagrań, a następnie ponowne wczytanie
+`docs/schoolmusic.sql`):
+```bash
+docker compose down -v
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+Skrypt `docs/schoolmusic.sql` jest wykonywany wyłącznie przy tworzeniu pustego wolumenu MariaDB. Zmiany
+schematu dla istniejącej bazy należy stosować plikami z [`docs/migrations`](docs/migrations/README.md).
+
+> **Ważne:** scheduler przerw może działać tylko w jednej instancji API. Dodatkowe repliki należy uruchamiać
+> z `Scheduler__Enabled=false`, aby nie rozpoczynały odtwarzania równolegle.
+
 ---
 
 ## Domyślne konta testowe
@@ -110,6 +153,10 @@ Baza demonstracyjna w kontenerze MariaDB (`docs/schoolmusic.sql`) jest wstępnie
 
 *Hasła w bazie danych są bezpiecznie zahashowane algorytmem **BCrypt**.*
 
+> Konta demonstracyjne istnieją wyłącznie w bazie startowej `docs/schoolmusic.sql` i w profilu
+> `docker-compose.dev.yml`. W środowisku produkcyjnym rejestracja lokalna jest wyłączona
+> (`Auth__AllowLocalRegistration=false`), a powyższe hasła nie mogą być używane.
+
 ---
 
 ## Interaktywna dokumentacja API (Scalar)
@@ -117,6 +164,9 @@ Baza demonstracyjna w kontenerze MariaDB (`docs/schoolmusic.sql`) jest wstępnie
 Aplikacja wykorzystuje nowoczesny interfejs **Scalar** zintegrowany ze specyfikacją **OpenAPI v1**:
 * **Adres interfejsu Scalar:** [http://localhost:8080/scalar/v1](http://localhost:8080/scalar/v1)
 * **Surowy schemat OpenAPI:** [http://localhost:8080/openapi/v1.json](http://localhost:8080/openapi/v1.json)
+
+> Scalar i endpoint OpenAPI są dostępne tylko w środowisku `Development` lub po jawnym ustawieniu
+> `Features__SwaggerEnabled=true`. Domyślnie w produkcji są wyłączone.
 
 ### Jak testować zabezpieczone endpointy w Scalar:
 1. W interfejsie Scalar przejdź do sekcji `Users` -> `POST /api/auth/login`.
@@ -140,10 +190,14 @@ Konfiguracja aplikacji zarządzana jest przez zmienne środowiskowe (zgodnie ze 
 | `Jwt__Key` | *(wymagana, min. 32 bajty)* | Klucz symetryczny do podpisywania tokenów JWT |
 | `Jwt__Issuer` | `SchoolMusicAPI` | Wystawca tokenów JWT |
 | `Jwt__Audience` | `SchoolMusicApp` | Odbiorca tokenów JWT |
+| `Auth__AllowLocalRegistration` | `false` | Publiczna rejestracja kont lokalnych (włączana tylko w profilu demo) |
+| `Scheduler__Enabled` | `true` | Czy ta instancja steruje automatycznym odtwarzaniem; tylko jedna instancja może mieć `true` |
+| `School__TimeZone` | `Europe/Warsaw` | Strefa czasowa szkoły używana przez harmonogram i statystyki |
 | `Spotify__ClientId` | *(opcjonalne)* | Identyfikator aplikacji Spotify Developer Dashboard |
 | `Spotify__ClientSecret` | *(opcjonalne)* | Sekret aplikacji Spotify Developer Dashboard |
 | `Spotify__RedirectUri` | `http://localhost:8080/api/spotify-playback/callback` | Callback autoryzacji Spotify OAuth |
 | `Spotify__DeviceName` | `PA Spotify` | Nazwa urządzenia Spotify Connect radiowęzła |
+| `Spotify__TokenEncryptionKey` | *(opcjonalne)* | Klucz szyfrowania zapisanego tokenu Spotify |
 
 ---
 
@@ -151,21 +205,26 @@ Konfiguracja aplikacji zarządzana jest przez zmienne środowiskowe (zgodnie ze 
 
 Jeśli chcesz rozwijać aplikację lokalnie na maszynie bez kontenera API:
 
-1. Uruchom same usługi bazodanowe (MariaDB i Redis):
+1. Uruchom same usługi bazodanowe (MariaDB i Redis) z profilu deweloperskiego:
    ```bash
-   docker compose up -d db redis
+   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db redis
    ```
-2. Skompiluj i uruchom backend:
+2. Ustaw połączenia lokalne (np. przez `dotnet user-secrets`) i uruchom backend:
    ```bash
+   dotnet user-secrets --project schoolmusic-backend set "ConnectionString:database" "server=localhost;port=3306;database=schoolmusic;user=schoolmusic;password=<hasło z .env>;"
+   dotnet user-secrets --project schoolmusic-backend set "ConnectionString:redis" "localhost:6379,password=<hasło z .env>"
    dotnet run --project schoolmusic-backend
    ```
-3. Aplikacja uruchomi się domyślnie na porcie `https://localhost:7198` lub `http://localhost:5242`.
+3. Aplikacja uruchomi się na adresach z `Properties/launchSettings.json`:
+   `http://localhost:5170`, `http://localhost:5200` lub `https://localhost:7241`.
+   W trybie `Development` brakujący `Jwt:Key` jest zastępowany losowym kluczem procesu, a logowanie LDAP
+   działa w trybie symulowanym na kontach `jan.kowalski` / `anna.nowak` (hasło `SzkolaPassword123!`).
 
 ---
 
 ## Testy jednostkowe i integracyjne
 
-Projekt posiada rozbudowany pakiet **183 zautomatyzowanych testów** sprawdzających logikę algorytmów kolejkowania, harmonogramu, moderacji oraz autoryzacji:
+Projekt posiada rozbudowany pakiet **240 zautomatyzowanych testów** sprawdzających logikę algorytmów kolejkowania, harmonogramu, moderacji oraz autoryzacji:
 
 ```bash
 # Uruchomienie wszystkich testów
@@ -195,3 +254,10 @@ System **SchoolMusic** umożliwia logowanie uczniów bezpośrednio ich kontami z
 
 **Konspekt prezentacji przed komisją:** Szczegółowe omówienie 10 punktów regulaminowych (Sekcje 14 i 15) znajduje się w pliku [`docs/PREZENTACJA.md`](docs/PREZENTACJA.md).
 **Schemat bazy danych demo:** Gotowy plik inicjalizacyjny SQL znajduje się w [`docs/schoolmusic.sql`](docs/schoolmusic.sql).
+
+---
+
+## Licencja
+
+Repozytorium nie zawiera obecnie pliku `LICENSE`. Warunki wykorzystania i publikacji kodu należy ustalić
+przed udostępnieniem projektu poza szkołą.
