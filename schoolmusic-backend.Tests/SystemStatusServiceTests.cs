@@ -9,11 +9,13 @@ namespace schoolmusic_backend.Tests;
 /// <summary>Deterministyczny <see cref="TimeProvider"/> dla testów.</summary>
 public sealed class ManualTimeProvider(DateTime now) : TimeProvider
 {
-    private readonly DateTimeOffset _now = new(DateTime.SpecifyKind(now, DateTimeKind.Utc));
+    private DateTimeOffset _now = new(DateTime.SpecifyKind(now, DateTimeKind.Utc));
 
     public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
 
     public override DateTimeOffset GetUtcNow() => _now;
+
+    public void Advance(TimeSpan value) => _now = _now.Add(value);
 }
 
 public class SystemStatusServiceTests

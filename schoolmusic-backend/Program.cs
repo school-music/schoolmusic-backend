@@ -167,7 +167,8 @@ builder.Services.AddSingleton<IAudioPlayerService, AudioPlayerService>();
 builder.Services.AddSingleton<ISpotifyConnectPlaybackService, SpotifyConnectPlaybackService>();
 builder.Services.AddSingleton<BreakSchedulerService>();
 builder.Services.AddSingleton<IBreakSchedulerService>(sp => sp.GetRequiredService<BreakSchedulerService>());
-builder.Services.AddHostedService(sp => sp.GetRequiredService<BreakSchedulerService>());
+if (builder.Configuration.GetValue("Scheduler:Enabled", true))
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<BreakSchedulerService>());
 builder.Services.AddSingleton<ISongSourceService, SpotifySongSource>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ISystemStatusService, SystemStatusService>();
@@ -176,6 +177,9 @@ builder.Services.AddSingleton<ILdapService, LdapService>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 
 var app = builder.Build();
+
+if (!builder.Configuration.GetValue("Scheduler:Enabled", true))
+    app.Logger.LogWarning("Break scheduler is disabled by configuration; this instance will not control automatic playback.");
 
 // Walidacja konfiguracji LDAP przy starcie aplikacji
 var ldapService = app.Services.GetRequiredService<ILdapService>();

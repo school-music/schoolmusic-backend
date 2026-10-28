@@ -47,9 +47,10 @@ public interface ISpotifyConnectPlaybackService
     Task SetVolumeAsync(int volume, CancellationToken cancellationToken = default);
 }
 
-public sealed class SpotifyPlaybackException(int statusCode, string message) : Exception(message)
+public sealed class SpotifyPlaybackException(int statusCode, string message, TimeSpan? retryAfter = null) : Exception(message)
 {
     public int StatusCode { get; } = statusCode;
+    public TimeSpan? RetryAfter { get; } = retryAfter;
 }
 
 public sealed class SpotifyConnectPlaybackService : ISpotifyConnectPlaybackService
@@ -525,7 +526,7 @@ public sealed class SpotifyConnectPlaybackService : ISpotifyConnectPlaybackServi
         HttpResponseMessage response,
         CancellationToken cancellationToken)
     {
-        var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+        _ = await response.Content.ReadAsStringAsync(cancellationToken);
         string message = response.StatusCode switch
         {
             HttpStatusCode.Unauthorized => "Spotify authorization failed; an administrator may need to reconnect the account.",
@@ -534,9 +535,12 @@ public sealed class SpotifyConnectPlaybackService : ISpotifyConnectPlaybackServi
             HttpStatusCode.TooManyRequests => "Spotify rate limit reached; retry the operation shortly.",
             _ => $"Spotify API request failed with HTTP {(int)response.StatusCode}."
         };
-        if (!string.IsNullOrWhiteSpace(detail))
-            message += $" {detail}";
-        return new SpotifyPlaybackException((int)response.StatusCode, message);
+        var retryAfter = response.Headers.RetryAfter?.Delta;
+        if (!retryAfter.HasValue && response.Headers.RetryAfter?.Date is DateTimeOffset retryDate)
+            retryAfter = retryDate - DateTimeOffset.UtcNow;
+        if (retryAfter < TimeSpan.Zero)
+            retryAfter = TimeSpan.Zero;
+        return new SpotifyPlaybackException((int)response.StatusCode, message, retryAfter);
     }
 
     private async Task<TokenResponse> ParseTokenResponseAsync(HttpResponseMessage response, CancellationToken cancellationToken)

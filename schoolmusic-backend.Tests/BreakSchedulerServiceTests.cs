@@ -23,6 +23,7 @@ public sealed class BreakSchedulerServiceTests
         public Mock<ISpotifyConnectPlaybackService> Spotify { get; } = new();
         public Mock<IAudioPlayerService> AudioPlayer { get; } = new();
         public Mock<ISystemStatusService> StatusService { get; } = new();
+        public ManualTimeProvider Clock { get; } = new(DateTime.UtcNow);
 
         public Fixture()
         {
@@ -72,7 +73,8 @@ public sealed class BreakSchedulerServiceTests
                 Provider.GetRequiredService<IServiceScopeFactory>(),
                 AudioPlayer.Object,
                 hubContext.Object,
-                NullLogger<BreakSchedulerService>.Instance);
+                NullLogger<BreakSchedulerService>.Instance,
+                Clock);
         }
 
         public async Task SeedActiveBreak(bool withTrack = true)
@@ -252,11 +254,126 @@ public sealed class BreakSchedulerServiceTests
             .ReturnsAsync(new SpotifyPlaybackSnapshot(false, false, false, null, null, null, 0, 0, 0, null));
 
         await fixture.Tick();
+        fixture.Clock.Advance(TimeSpan.FromSeconds(3));
         await fixture.Tick();
 
         fixture.Spotify.Verify(service => service.StartPlaybackAsync(
             It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
         Assert.Equal(1, fixture.Service.GetActiveBreakId());
+    }
+
+    [Fact]
+    public async Task Tick_AfterRestartWithMatchingSpotifyPlayback_DoesNotSubmitQueueAgain()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak();
+        using (var scope = fixture.Provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+            var item = await db.QueueItems.SingleAsync();
+            item.Status = QueueItemStatuses.Playing;
+            await db.SaveChangesAsync();
+        }
+
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Equal(1, fixture.Service.GetActiveBreakId());
+    }
+
+    [Fact]
+    public async Task Tick_AfterRestartWhenPlaybackStateIsUnavailable_DoesNotStartDuplicatePlaybackImmediately()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak();
+        using (var scope = fixture.Provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+            var item = await db.QueueItems.SingleAsync();
+            item.Status = QueueItemStatuses.Playing;
+            await db.SaveChangesAsync();
+        }
+        fixture.Spotify.Setup(service => service.GetPlaybackStateAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new SpotifyPlaybackException(503, "temporarily unavailable"));
+
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Tick_WhenSpotifyAuthorizationFails_BlocksRetriesUntilConfigurationChanges()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak();
+        fixture.Spotify.SetupSequence(service => service.StartPlaybackAsync(
+                It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new SpotifyPlaybackException(401, "authorization expired"))
+            .ReturnsAsync([new SpotifyQueueTrack(1, "A12345678901234567890", "Song", "Artist")]);
+
+        await fixture.Tick();
+        fixture.Clock.Advance(TimeSpan.FromHours(1));
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        fixture.Service.NotifyPlaybackConfigurationChanged();
+        await fixture.Tick();
+
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task Tick_WhenSpotifyReturnsRateLimit_WaitsForRetryAfter()
+    {
+        await using var fixture = new Fixture();
+        await fixture.SeedActiveBreak();
+        fixture.Spotify.SetupSequence(service => service.StartPlaybackAsync(
+                It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new SpotifyPlaybackException(429, "rate limit", TimeSpan.FromSeconds(30)))
+            .ReturnsAsync([new SpotifyQueueTrack(1, "A12345678901234567890", "Song", "Artist")]);
+
+        await fixture.Tick();
+        fixture.Clock.Advance(TimeSpan.FromSeconds(29));
+        await fixture.Tick();
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        fixture.Clock.Advance(TimeSpan.FromSeconds(1));
+        await fixture.Tick();
+        fixture.Spotify.Verify(service => service.StartPlaybackAsync(
+            It.IsAny<IReadOnlyList<SpotifyQueueTrack>>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task Tick_OnStartup_MarksOldInterruptedSpecialEventAsDone()
+    {
+        await using var fixture = new Fixture();
+        using (var scope = fixture.Provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+            db.SpecialEvents.Add(new SpecialEvent
+            {
+                Id = 1,
+                Title = "Stare wydarzenie",
+                FileUrl = "old-event.mp3",
+                StartsAt = DateTime.Now.AddHours(-1),
+                EventStatus = "playing"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await fixture.Tick();
+
+        using var verificationScope = fixture.Provider.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+        Assert.Equal("done", (await verificationDb.SpecialEvents.SingleAsync()).EventStatus);
+        fixture.AudioPlayer.Verify(service => service.PlayFileOrUrlAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
     }
 
     [Fact]

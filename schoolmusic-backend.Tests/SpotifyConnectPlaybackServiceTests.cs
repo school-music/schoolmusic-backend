@@ -1,10 +1,13 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
+using schoolmusic_backend.Controllers;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 
@@ -238,6 +241,48 @@ public sealed class SpotifyConnectPlaybackServiceTests
         using var body = System.Text.Json.JsonDocument.Parse(play.Body!);
         var uris = body.RootElement.GetProperty("uris").EnumerateArray().Select(value => value.GetString()).ToArray();
         Assert.Equal(new[] { $"spotify:track:{firstId}", $"spotify:track:{alternateId}" }, uris);
+    }
+
+    [Fact]
+    public async Task SpotifyRateLimit_ExposesRetryAfterWithoutReturningResponseBody()
+    {
+        await using var fixture = new Fixture();
+        await fixture.AuthorizeAsync();
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/token")
+                return Task.FromResult(Json(HttpStatusCode.OK, TokenResponse("access-playback", null, null)));
+            if (request.RequestUri.AbsolutePath == "/v1/me/player/devices")
+            {
+                var response = Json(HttpStatusCode.TooManyRequests, "{\"sensitive_detail\":\"not-for-client\"}");
+                response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(42));
+                return Task.FromResult(response);
+            }
+            throw new InvalidOperationException($"Unexpected request: {request.RequestUri}");
+        });
+        var service = fixture.CreateService(handler);
+
+        var exception = await Assert.ThrowsAsync<SpotifyPlaybackException>(() => service.GetPlaybackStateAsync());
+
+        Assert.Equal(429, exception.StatusCode);
+        Assert.Equal(TimeSpan.FromSeconds(42), exception.RetryAfter);
+        Assert.DoesNotContain("sensitive_detail", exception.Message);
+    }
+
+    [Fact]
+    public async Task SpotifyCallback_AfterSuccessfulAuthorization_UnblocksSchedulerRetries()
+    {
+        var spotify = new Mock<ISpotifyConnectPlaybackService>();
+        spotify.Setup(service => service.CompleteAuthorizationAsync(
+                "code", "state", null, It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var scheduler = new Mock<IBreakSchedulerService>();
+        var controller = new SpotifyPlaybackController(spotify.Object, scheduler.Object);
+
+        var result = await controller.Callback("code", "state", null, CancellationToken.None);
+
+        Assert.IsType<ContentResult>(result);
+        scheduler.Verify(service => service.NotifyPlaybackConfigurationChanged(), Times.Once);
     }
 
     private static HttpResponseMessage Json(HttpStatusCode status, string json) =>

@@ -13,6 +13,7 @@ public interface IBreakSchedulerService
     int? GetActiveBreakId();
     Task ProcessTickAsync(CancellationToken stoppingToken = default);
     void NotifyScheduleChanged();
+    void NotifyPlaybackConfigurationChanged();
 }
 
 public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerService
@@ -21,6 +22,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     private readonly IHubContext<QueueHub> _hubContext;
     private readonly ILogger<BreakSchedulerService> _logger;
     private readonly IAudioPlayerService? _audioPlayer;
+    private readonly TimeProvider _timeProvider;
     private readonly Channel<bool> _wakeUpSignal = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
     {
         FullMode = BoundedChannelFullMode.DropWrite,
@@ -40,25 +42,32 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     private bool _localPlaybackActive;
     private bool _resumePending;
     private int? _activeSpecialEventId;
+    private bool _startupReconciled;
+    private bool _spotifyRetryBlocked;
+    private int _spotifyFailureCount;
+    private DateTimeOffset _nextSpotifyAttemptAtUtc = DateTimeOffset.MinValue;
 
     public TimeSpan NextDelay => _nextDelay;
 
     public BreakSchedulerService(
         IServiceScopeFactory scopeFactory,
         IHubContext<QueueHub> hubContext,
-        ILogger<BreakSchedulerService> logger)
+        ILogger<BreakSchedulerService> logger,
+        TimeProvider? timeProvider = null)
     {
         _scopeFactory = scopeFactory;
         _hubContext = hubContext;
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public BreakSchedulerService(
         IServiceScopeFactory scopeFactory,
         IAudioPlayerService audioPlayer,
         IHubContext<QueueHub> hubContext,
-        ILogger<BreakSchedulerService> logger)
-        : this(scopeFactory, hubContext, logger)
+        ILogger<BreakSchedulerService> logger,
+        TimeProvider? timeProvider = null)
+        : this(scopeFactory, hubContext, logger, timeProvider)
     {
         _audioPlayer = audioPlayer;
     }
@@ -79,6 +88,19 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     {
         if (_wakeUpSignal.Writer.TryWrite(true))
             _logger.LogDebug("Scheduler received a schedule change notification.");
+    }
+
+    public void NotifyPlaybackConfigurationChanged()
+    {
+        lock (_planLock)
+        {
+            _spotifyRetryBlocked = false;
+            _spotifyFailureCount = 0;
+            _nextSpotifyAttemptAtUtc = DateTimeOffset.MinValue;
+            _queueSubmitted = false;
+        }
+        NotifyScheduleChanged();
+        _logger.LogInformation("Spotify playback configuration changed; automatic playback attempts are enabled again.");
     }
 
     public async Task<bool> SkipCurrentTrackAsync()
@@ -165,6 +187,12 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         var weekday = (sbyte)now.DayOfWeek;
         if (weekday == 0) weekday = 7;
 
+        if (!_startupReconciled)
+        {
+            await ReconcileStartupStateAsync(db, queueService, now, cancellationToken);
+            _startupReconciled = true;
+        }
+
         var pendingEvent = await db.SpecialEvents
             .Where(item => item.EventStatus == "pending" && item.StartsAt <= now)
             .OrderBy(item => item.StartsAt)
@@ -190,7 +218,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         }
 
         var localPlayer = _audioPlayer ?? scope.ServiceProvider.GetService<IAudioPlayerService>();
-        if (localPlayer?.GetStatus().Source is not null and not "None")
+        if (localPlayer?.GetStatus()?.Source is not null and not "None")
         {
             if (!_localPlaybackActive || _pausePending)
                 await PauseSpotifyForLocalPlaybackAsync(scope.ServiceProvider, cancellationToken);
@@ -217,18 +245,20 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             }
 
             var spotifyService = scope.ServiceProvider.GetService<ISpotifyConnectPlaybackService>();
-            if (spotifyService != null)
+            if (spotifyService != null && CanAttemptSpotify())
             {
                 try
                 {
                     await spotifyService.ResumeAsync(cancellationToken);
                     _resumePending = false;
+                    ResetSpotifyFailures();
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
                     ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
                 {
                     _logger.LogWarning(ex, "Could not resume Spotify after local playback; resume will be retried.");
                     _resumePending = true;
+                    RegisterSpotifyFailure(ex);
                 }
             }
         }
@@ -236,19 +266,28 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         if (_resumePending && !_localPlaybackActive && !localPlaybackJustEnded)
         {
             var spotifyService = scope.ServiceProvider.GetService<ISpotifyConnectPlaybackService>();
-            if (spotifyService != null)
+            if (spotifyService != null && CanAttemptSpotify())
             {
                 try
                 {
                     await spotifyService.ResumeAsync(cancellationToken);
                     _resumePending = false;
+                    ResetSpotifyFailures();
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
                     ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
                 {
                     _logger.LogWarning(ex, "Spotify resume remains pending after local playback.");
+                    RegisterSpotifyFailure(ex);
                 }
             }
+        }
+
+        if (_pausePending && CanAttemptSpotify())
+        {
+            var pendingPauseService = scope.ServiceProvider.GetService<ISpotifyConnectPlaybackService>();
+            if (pendingPauseService != null)
+                await RetryPauseAsync(pendingPauseService, cancellationToken);
         }
 
         var isDayOff = await db.ExceptionDays.AnyAsync(item =>
@@ -368,6 +407,9 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
                 _lastPlayingTrackIndex = -1;
                 _queueSubmitted = false;
             }
+            var recoverySpotify = scope.ServiceProvider.GetService<ISpotifyConnectPlaybackService>();
+            if (recoverySpotify != null)
+                await TryRecoverActivePlaybackAsync(db, queueService, recoverySpotify, cancellationToken);
             await queueService.BroadcastQueueAsync(activeBreak.Id);
             if (tracks.Count == 0)
             {
@@ -377,10 +419,6 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             }
         }
 
-        var spotify = scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>();
-        if (_pausePending)
-            await RetryPauseAsync(spotify, cancellationToken);
-
         if (_spotifyTracks.Count == 0)
         {
             var status = await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
@@ -388,8 +426,11 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             return;
         }
 
-        await SubmitQueueIfNeededAsync(db, queueService, spotify, cancellationToken);
-        await PollPlaybackAsync(db, queueService, spotify, cancellationToken);
+        var spotify = scope.ServiceProvider.GetRequiredService<ISpotifyConnectPlaybackService>();
+        if (CanAttemptSpotify())
+            await SubmitQueueIfNeededAsync(db, queueService, spotify, cancellationToken);
+        if (CanAttemptSpotify())
+            await PollPlaybackAsync(db, queueService, spotify, cancellationToken);
         var finalStatus = await BroadcastSchoolStatusIfChangedAsync(scope, cancellationToken);
         _nextDelay = await CalculateNextDelayAsync(db, finalStatus, now, cancellationToken);
     }
@@ -407,6 +448,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         {
             var plannedTracks = _spotifyTracks;
             var playableTracks = await spotify.StartPlaybackAsync(plannedTracks, cancellationToken);
+            ResetSpotifyFailures();
             _queueSubmitted = true;
             _spotifyTracks = playableTracks.ToList();
 
@@ -431,6 +473,7 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
         {
+            RegisterSpotifyFailure(ex);
             _logger.LogWarning(ex, "Spotify Connect is unavailable; playback will be retried while the break is active.");
         }
     }
@@ -445,12 +488,14 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         try
         {
             snapshot = await spotify.GetPlaybackStateAsync(cancellationToken);
+            ResetSpotifyFailures();
             if (!snapshot.DeviceAvailable)
                 _queueSubmitted = false;
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
         {
             _queueSubmitted = false;
+            RegisterSpotifyFailure(ex);
             _logger.LogWarning(ex, "Spotify playback state is unavailable; playback will be retried during this break.");
             snapshot = new SpotifyPlaybackSnapshot(false, false, false, null, null, null, 0, 0, 0, null);
         }
@@ -543,9 +588,11 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         {
             await spotify.PauseAsync(cancellationToken);
             _pausePending = false;
+            ResetSpotifyFailures();
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
         {
+            RegisterSpotifyFailure(ex);
             _logger.LogWarning(ex, "Spotify pause is pending and will be retried.");
         }
     }
@@ -555,18 +602,21 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
         CancellationToken cancellationToken)
     {
         var spotify = services.GetService<ISpotifyConnectPlaybackService>();
-        if (spotify == null)
+        if (spotify == null || !CanAttemptSpotify())
             return;
 
         try
         {
             await spotify.PauseAsync(cancellationToken);
             _pausePending = false;
+            ResetSpotifyFailures();
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
             ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
         {
             _pausePending = true;
+            RegisterSpotifyFailure(ex);
+            _logger.LogWarning(ex, "Could not pause Spotify for local playback; pause will be retried.");
         }
     }
 
@@ -583,10 +633,12 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             await spotify.PauseAsync(cancellationToken);
             _pausePending = false;
             pauseSucceeded = true;
+            ResetSpotifyFailures();
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
         {
             _pausePending = true;
+            RegisterSpotifyFailure(ex);
             _logger.LogWarning(ex, "Could not pause Spotify at break end; pause will be retried.");
         }
 
@@ -633,6 +685,138 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
             _lastKioskStatus = status;
         }
         return status;
+    }
+
+    private async Task ReconcileStartupStateAsync(
+        schoolmusicContext db,
+        IQueueService queueService,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        var interruptedEvents = await db.SpecialEvents
+            .Where(item => item.EventStatus == "playing")
+            .ToListAsync(cancellationToken);
+        var localPlaybackActive = interruptedEvents.Count > 0 &&
+            _audioPlayer?.GetStatus()?.Source is not null and not "None";
+        if (!localPlaybackActive)
+        {
+            foreach (var interruptedEvent in interruptedEvents)
+            {
+                interruptedEvent.EventStatus = interruptedEvent.StartsAt >= now.AddMinutes(-15)
+                    ? "pending"
+                    : "done";
+                _logger.LogWarning(
+                    "Recovered interrupted special event {EventId} with status {EventStatus}.",
+                    interruptedEvent.Id,
+                    interruptedEvent.EventStatus);
+            }
+        }
+
+        var playback = await db.PlaybackStates
+            .Include(item => item.CurrentQueueItem!)
+                .ThenInclude(item => item.Break)
+            .FirstOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        var playbackBreak = playback?.CurrentQueueItem?.Break;
+        if (playback != null && playbackBreak != null &&
+            (playbackBreak.BreakDate < DateOnly.FromDateTime(now) || playbackBreak.EndsAt <= now))
+        {
+            _logger.LogWarning(
+                "Archiving stale playback state for ended break {BreakId} during scheduler startup.",
+                playbackBreak.Id);
+            await queueService.ArchiveBreakAsync(playbackBreak.Id);
+            playback.CurrentQueueItemId = null;
+            playback.StartedAt = null;
+            playback.IsPaused = false;
+            playback.UpdatedAt = now;
+        }
+
+        if (db.ChangeTracker.HasChanges())
+            await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task TryRecoverActivePlaybackAsync(
+        schoolmusicContext db,
+        IQueueService queueService,
+        ISpotifyConnectPlaybackService spotify,
+        CancellationToken cancellationToken)
+    {
+        var playback = await db.PlaybackStates.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        if (playback?.CurrentQueueItemId is not int currentQueueItemId)
+            return;
+
+        var persistedItem = await db.QueueItems.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == currentQueueItemId, cancellationToken);
+        if (persistedItem?.Status != QueueItemStatuses.Playing)
+            return;
+
+        try
+        {
+            var snapshot = await spotify.GetPlaybackStateAsync(cancellationToken);
+            ResetSpotifyFailures();
+            if (!snapshot.DeviceAvailable || string.IsNullOrWhiteSpace(snapshot.SpotifyTrackId))
+                return;
+
+            var currentIndex = _spotifyTracks.FindIndex(item =>
+                item.QueueItemId == persistedItem.Id &&
+                SpotifyId(item.SpotifyId) == snapshot.SpotifyTrackId);
+            if (currentIndex < 0)
+                return;
+
+            _queueSubmitted = true;
+            _lastPlayingTrackIndex = currentIndex;
+            await UpdateQueuePlaybackStateAsync(db, queueService, currentIndex, snapshot, cancellationToken);
+            _logger.LogInformation(
+                "Recovered Spotify playback for queue item {QueueItemId} in break {BreakId}.",
+                persistedItem.Id,
+                persistedItem.BreakId);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+            ex is SpotifyPlaybackException or HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            RegisterSpotifyFailure(ex);
+            _logger.LogWarning(ex, "Could not reconcile Spotify playback during scheduler startup.");
+        }
+    }
+
+    private bool CanAttemptSpotify()
+    {
+        lock (_planLock)
+        {
+            return !_spotifyRetryBlocked && _timeProvider.GetUtcNow() >= _nextSpotifyAttemptAtUtc;
+        }
+    }
+
+    private void RegisterSpotifyFailure(Exception exception)
+    {
+        lock (_planLock)
+        {
+            if (exception is SpotifyPlaybackException { StatusCode: 401 or 403 })
+            {
+                _spotifyRetryBlocked = true;
+                _nextSpotifyAttemptAtUtc = DateTimeOffset.MaxValue;
+                _logger.LogError(
+                    "Automatic Spotify retries were blocked after HTTP {StatusCode}; an administrator must reconnect or fix permissions.",
+                    ((SpotifyPlaybackException)exception).StatusCode);
+                return;
+            }
+
+            _spotifyFailureCount = Math.Min(_spotifyFailureCount + 1, 6);
+            var delay = exception is SpotifyPlaybackException { StatusCode: 429 } rateLimit
+                ? rateLimit.RetryAfter ?? TimeSpan.FromMinutes(1)
+                : TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, _spotifyFailureCount)));
+            delay = TimeSpan.FromSeconds(Math.Clamp(delay.TotalSeconds, 1, 300));
+            _nextSpotifyAttemptAtUtc = _timeProvider.GetUtcNow().Add(delay);
+        }
+    }
+
+    private void ResetSpotifyFailures()
+    {
+        lock (_planLock)
+        {
+            _spotifyFailureCount = 0;
+            _nextSpotifyAttemptAtUtc = DateTimeOffset.MinValue;
+        }
     }
 
     private async Task<TimeSpan> CalculateNextDelayAsync(

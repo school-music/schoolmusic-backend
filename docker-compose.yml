@@ -42,6 +42,7 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       Features__SwaggerEnabled: "false"
       Auth__AllowLocalRegistration: "false"
+      Scheduler__Enabled: "true"
       ConnectionString__database: "server=db;port=3306;database=schoolmusic;user=${DB_USER:-schoolmusic};password=${DB_PASSWORD:?Ustaw DB_PASSWORD w pliku .env};"
       ConnectionString__redis: "redis:6379,password=${REDIS_PASSWORD:?Ustaw REDIS_PASSWORD w pliku .env}"
       Jwt__Issuer: SchoolMusicAPI

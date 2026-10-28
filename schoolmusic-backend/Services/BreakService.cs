@@ -62,6 +62,26 @@ namespace schoolmusic_backend.Services
                 .ThenBy(q => q.OrderIndex)
                 .ToList();
 
+            // Po restarcie trwający utwór musi pozostać w planie nawet wtedy, gdy jego pełna długość
+            // jest większa od czasu pozostałego do końca przerwy. Faktyczny postęp uzgadnia scheduler ze Spotify.
+            var currentlyPlaying = pool.FirstOrDefault(item => item.Status == QueueItemStatuses.Playing);
+            if (currentlyPlaying != null)
+            {
+                int durationSec = currentlyPlaying.Song.DurationMs / 1000;
+                playlist.Add(new ScheduledTrackDto(
+                    currentlyPlaying.Id,
+                    currentlyPlaying.SongId,
+                    currentlyPlaying.Song.Title,
+                    currentlyPlaying.Song.Artist?.Name ?? "",
+                    currentlyPlaying.Song.Cover ?? "",
+                    currentlyPlaying.Song.DurationMs,
+                    currentlyPlaying.Votes.Count,
+                    0,
+                    1));
+                currentOffset = Math.Min(durationSec, breakDurationSeconds);
+                pool.Remove(currentlyPlaying);
+            }
+
             for(int i = 0; i < pool.Count; i++)
             {
                 var item = pool[i];
@@ -73,7 +93,7 @@ namespace schoolmusic_backend.Services
                         item.SongId,
                         item.Song.Title,
                         item.Song.Artist?.Name ?? "",
-                        item.Song.Cover,
+                        item.Song.Cover ?? "",
                         item.Song.DurationMs,
                         item.Votes.Count,
                         currentOffset,
@@ -106,7 +126,7 @@ namespace schoolmusic_backend.Services
                         gapFiller.SongId,
                         gapFiller.Song.Title,
                         gapFiller.Song.Artist?.Name ?? "",
-                        gapFiller.Song.Cover,
+                        gapFiller.Song.Cover ?? "",
                         gapFiller.Song.DurationMs,
                         gapFiller.Votes.Count,
                         currentOffset,

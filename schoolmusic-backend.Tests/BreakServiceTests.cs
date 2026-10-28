@@ -4,7 +4,7 @@ using Xunit;
 
 namespace schoolmusic_backend.Tests
 {
-    public class BreakServiceTests
+public class BreakServiceTests
     {
         private readonly BreakService _breakService = new();
 
@@ -96,6 +96,20 @@ namespace schoolmusic_backend.Tests
         }
 
         [Fact]
+        public void CalculateBreak_AfterRestart_KeepsCurrentlyPlayingTrackEvenWhenItExceedsRemainingTime()
+        {
+            var track = CreateQueueItem(1, 1, "Long Song", 200000, 10);
+            track.Status = QueueItemStatuses.Playing;
+
+            var plan = _breakService.CalculateBreak(1, 100, [track]);
+
+            var scheduled = Assert.Single(plan.Tracks);
+            Assert.Equal(track.Id, scheduled.QueueItemId);
+            Assert.Equal(100, plan.ScheduledMusicDurationSeconds);
+            Assert.Equal(0, plan.RemainingSeconds);
+        }
+
+        [Fact]
         public void CalculateBreak_ExactFit_SchedulesAllTracksWithZeroRemaining()
         {
             // Arrange: 2 utwory po 150s (2.5 min) = 300s. Przerwa dokładnie 300s.
@@ -127,6 +141,7 @@ namespace schoolmusic_backend.Tests
                 SongId = songId,
                 BreakId = 1,
                 ModerationStatus = "approved",
+                Status = QueueItemStatuses.Queued,
                 OrderIndex = id,
                 Song = new Song
                 {

@@ -10,7 +10,9 @@ namespace schoolmusic_backend.Controllers;
 [ApiController]
 [Route("api/spotify-playback")]
 [Authorize(Roles = "admin,head_admin")]
-public sealed class SpotifyPlaybackController(ISpotifyConnectPlaybackService spotify) : ControllerBase
+public sealed class SpotifyPlaybackController(
+    ISpotifyConnectPlaybackService spotify,
+    IBreakSchedulerService? scheduler = null) : ControllerBase
 {
     /// <summary>
     /// Generuje adres autoryzacyjny Spotify OAuth 2.0 i przekierowuje do logowania konta radiowęzła.
@@ -46,6 +48,7 @@ public sealed class SpotifyPlaybackController(ISpotifyConnectPlaybackService spo
         try
         {
             await spotify.CompleteAuthorizationAsync(code, state, error, cancellationToken);
+            scheduler?.NotifyPlaybackConfigurationChanged();
             return Content("Spotify playback account connected. You may close this page.", "text/plain");
         }
         catch (SpotifyPlaybackException ex)
