@@ -1,0 +1,14 @@
+services:
+  db:
+    ports:
+      - "3306:3306"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  api:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Features__SwaggerEnabled: "true"
+      Auth__AllowLocalRegistration: "true"

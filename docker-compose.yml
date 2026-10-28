@@ -3,16 +3,16 @@ services:
     image: mariadb:10.4
     container_name: schoolmusic-db
     restart: unless-stopped
-    ports:
-      - "3306:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: secret
-      MYSQL_DATABASE: schoolmusic
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Ustaw DB_ROOT_PASSWORD w pliku .env}
+      MARIADB_DATABASE: schoolmusic
+      MARIADB_USER: ${DB_USER:-schoolmusic}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Ustaw DB_PASSWORD w pliku .env}
     volumes:
       - mariadb_data:/var/lib/mysql
       - ./docs/schoolmusic.sql:/docker-entrypoint-initdb.d/01_init.sql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-psecret"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p\"$${MARIADB_ROOT_PASSWORD}\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -21,8 +21,14 @@ services:
     image: redis:7-alpine
     container_name: schoolmusic-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD}\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Ustaw REDIS_PASSWORD w pliku .env}
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   api:
     build:
@@ -33,26 +39,30 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - ASPNETCORE_ENVIRONMENT=Production
-      - Features__SwaggerEnabled=true
-      - ConnectionString__database=server=db;port=3306;database=schoolmusic;user=root;password=secret;
-      - ConnectionString__redis=redis:6379
-      - Jwt__Issuer=SchoolMusicAPI
-      - Jwt__Audience=SchoolMusicApp
-      - Jwt__Key=schoolmusic_super_secret_jwt_key_2026_dev!
-      - Spotify__ClientId=${SPOTIFY_CLIENT_ID:-}
-      - Spotify__ClientSecret=${SPOTIFY_CLIENT_SECRET:-}
-      - Spotify__RedirectUri=${SPOTIFY_REDIRECT_URI:-}
-      - Spotify__DeviceName=${SPOTIFY_DEVICE_NAME:-PA Spotify}
-      - Spotify__TokenEncryptionKey=${SPOTIFY_TOKEN_ENCRYPTION_KEY:-}
-      - Cors__AllowedOrigins__0=http://localhost:3000
-      - Cors__AllowedOrigins__1=http://localhost:5173
-      - Cors__AllowedOrigins__2=http://localhost:8080
+      ASPNETCORE_ENVIRONMENT: Production
+      Features__SwaggerEnabled: "false"
+      Auth__AllowLocalRegistration: "false"
+      ConnectionString__database: "server=db;port=3306;database=schoolmusic;user=${DB_USER:-schoolmusic};password=${DB_PASSWORD:?Ustaw DB_PASSWORD w pliku .env};"
+      ConnectionString__redis: "redis:6379,password=${REDIS_PASSWORD:?Ustaw REDIS_PASSWORD w pliku .env}"
+      Jwt__Issuer: SchoolMusicAPI
+      Jwt__Audience: SchoolMusicApp
+      Jwt__Key: ${JWT_KEY:?Ustaw JWT_KEY w pliku .env}
+      Spotify__ClientId: ${SPOTIFY_CLIENT_ID:-}
+      Spotify__ClientSecret: ${SPOTIFY_CLIENT_SECRET:-}
+      Spotify__RedirectUri: ${SPOTIFY_REDIRECT_URI:-}
+      Spotify__DeviceName: ${SPOTIFY_DEVICE_NAME:-PA Spotify}
+      Spotify__TokenEncryptionKey: ${SPOTIFY_TOKEN_ENCRYPTION_KEY:-}
+      Cors__AllowedOrigins__0: http://localhost:3000
+      Cors__AllowedOrigins__1: http://localhost:5173
+      Cors__AllowedOrigins__2: http://localhost:8080
+    volumes:
+      - recordings_data:/app/recordings
     depends_on:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   mariadb_data:
+  recordings_data:

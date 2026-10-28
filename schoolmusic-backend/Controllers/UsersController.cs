@@ -1,10 +1,8 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
 using schoolmusic_backend.Models;
-using System.Security.Claims;
-using System.Text;
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using schoolmusic_backend.Services;
 
@@ -22,15 +20,18 @@ public class UsersController : ControllerBase
     private readonly schoolmusicContext _context;
     private readonly IConfiguration _configuration;
     private readonly ILdapService _ldapService;
+    private readonly IJwtTokenService _jwtTokenService;
 
     public UsersController(
         schoolmusicContext context,
         IConfiguration configuration,
-        ILdapService ldapService)
+        ILdapService ldapService,
+        IJwtTokenService jwtTokenService)
     {
         _context = context;
         _configuration = configuration;
         _ldapService = ldapService;
+        _jwtTokenService = jwtTokenService;
     }
 
     /// <summary>
@@ -101,6 +102,7 @@ public class UsersController : ControllerBase
         if (existingUser != null)
         {
             bool isPasswordCorrect = BCrypt.Net.BCrypt.Verify(userLoginDto.password, existingUser.UserPassword);
+            bool authenticatedWithLdap = false;
 
             // Jeśli hasło lokalne nie pasuje, ale LDAP jest włączony, sprawdzamy w katalogu LDAP
             if (!isPasswordCorrect && _ldapService.IsEnabled)
@@ -109,6 +111,7 @@ public class UsersController : ControllerBase
                 if (ldapFallback.Success && ldapFallback.User != null)
                 {
                     isPasswordCorrect = true;
+                    authenticatedWithLdap = true;
                 }
             }
 
@@ -123,7 +126,7 @@ public class UsersController : ControllerBase
                 return StatusCode(StatusCodes.Status403Forbidden, new { Message = "Twoje konto zostało zablokowane przez moderatora." });
             }
 
-            return GenerateLoginResponse(existingUser, "User zalogowany poprawnie", isLdap: false);
+            return GenerateLoginResponse(existingUser, "User zalogowany poprawnie", isLdap: authenticatedWithLdap);
         }
 
         // 2. Użytkownika nie ma w bazie lokalnej -> Próba logowania przez szkolne konto LDAP (JIT Provisioning)
@@ -257,6 +260,14 @@ public class UsersController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> Register([FromBody] UserRegisterDto dto)
     {
+        if (!_configuration.GetValue<bool>("Auth:AllowLocalRegistration"))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                Message = "Publiczna rejestracja kont lokalnych jest wyłączona. Użyj szkolnego konta LDAP."
+            });
+        }
+
         if (string.IsNullOrWhiteSpace(dto.password) || string.IsNullOrWhiteSpace(dto.name))
         {
             return BadRequest(new
@@ -340,28 +351,7 @@ public class UsersController : ControllerBase
 
     private IActionResult GenerateLoginResponse(User user, string message, bool isLdap = false)
     {
-        var jwtSettings = _configuration.GetSection("Jwt");
-        var key = Encoding.UTF8.GetBytes(jwtSettings["Key"] ?? "default_jwt_secret_key_development_only");
-        var credentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256);
-
-        var claims = new[]
-        {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
-            new Claim(JwtRegisteredClaimNames.UniqueName, user.UserLogin),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-            new Claim(ClaimTypes.Role, user.Rank?.Rank1 ?? "user"),
-            new Claim("auth_method", isLdap ? "ldap" : "password")
-        };
-
-        var token = new JwtSecurityToken(
-            issuer: jwtSettings["Issuer"],
-            audience: jwtSettings["Audience"],
-            claims: claims,
-            expires: DateTime.UtcNow.AddHours(12),
-            signingCredentials: credentials
-        );
-
-        string tokenString = new JwtSecurityTokenHandler().WriteToken(token);
+        string tokenString = _jwtTokenService.CreateToken(user, isLdap);
 
         return Ok(new LoginResponseDto(
             Message: message,

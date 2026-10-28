@@ -50,6 +50,11 @@ jobs:
     name: Verify Docker & Compose Build
     needs: build-and-test
     runs-on: ubuntu-latest
+    env:
+      DB_ROOT_PASSWORD: ci-root-password-not-used-in-production
+      DB_PASSWORD: ci-database-password-not-used-in-production
+      REDIS_PASSWORD: ci-redis-password-not-used-in-production
+      JWT_KEY: ci-jwt-key-with-at-least-32-bytes-not-production
 
     steps:
       - name: Checkout repository

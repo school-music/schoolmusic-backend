@@ -80,13 +80,15 @@ Wszystkie usługi (API, baza danych MariaDB z wgranymi danymi demo oraz Redis) u
    ```
 2. Uruchom środowisko demonstracyjne:
    ```bash
-   docker compose up -d
+   cp .env.example .env
+   # Uzupełnij losowe hasła i klucz JWT w pliku .env
+   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
    ```
 3. Poczekaj kilkanaście sekund na inicjalizację bazy MariaDB i start API.
 4. **Gotowe!** System jest dostępny pod adresami:
    * **API Backend:** `http://localhost:8080`
    * **Interaktywna dokumentacja Scalar:** `http://localhost:8080/scalar/v1`
-   * **Baza danych MariaDB:** `localhost:3306` (baza: `schoolmusic`, user: `root`, hasło: `secret`)
+   * **Baza danych MariaDB:** `localhost:3306` (baza: `schoolmusic`, dane logowania z pliku `.env`)
    * **Redis Cache:** `localhost:6379`
 
 Aby zatrzymać środowisko:
@@ -129,13 +131,13 @@ Aplikacja wykorzystuje nowoczesny interfejs **Scalar** zintegrowany ze specyfika
 
 Konfiguracja aplikacji zarządzana jest przez zmienne środowiskowe (zgodnie ze standardem *12-Factor App*):
 
-| Zmienna środowiskowa | Domyślna wartość w Dockerze | Opis |
+| Zmienna środowiskowa | Wartość domyślna | Opis |
 | :--- | :--- | :--- |
 | `ASPNETCORE_ENVIRONMENT` | `Production` | Środowisko uruchomieniowe ASP.NET Core |
-| `Features__SwaggerEnabled` | `true` | Aktywuje dokumentację Scalar / OpenAPI na produkcji |
-| `ConnectionString__database` | `server=db;port=3306;database=schoolmusic;user=root;password=secret;` | Połączenie do MariaDB |
-| `ConnectionString__redis` | `redis:6379` | Połączenie do instancji Redis |
-| `Jwt__Key` | `schoolmusic_super_secret_jwt_key_2026_dev!` | Klucz symetryczny do podpisywania tokenów JWT |
+| `Features__SwaggerEnabled` | `false` | Aktywuje dokumentację Scalar / OpenAPI poza środowiskiem Development |
+| `ConnectionString__database` | *(wymagana)* | Połączenie do MariaDB z dedykowanym użytkownikiem aplikacji |
+| `ConnectionString__redis` | *(wymagana)* | Połączenie do Redis zabezpieczone hasłem |
+| `Jwt__Key` | *(wymagana, min. 32 bajty)* | Klucz symetryczny do podpisywania tokenów JWT |
 | `Jwt__Issuer` | `SchoolMusicAPI` | Wystawca tokenów JWT |
 | `Jwt__Audience` | `SchoolMusicApp` | Odbiorca tokenów JWT |
 | `Spotify__ClientId` | *(opcjonalne)* | Identyfikator aplikacji Spotify Developer Dashboard |

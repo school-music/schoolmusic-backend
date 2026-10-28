@@ -1,8 +1,12 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
+using Microsoft.Extensions.Options;
 using Scalar.AspNetCore;
 using schoolmusic_backend.Models;
+using schoolmusic_backend.Configuration;
+using System.Security.Cryptography;
 using System.Text;
 using StackExchange.Redis;
 using LibVLCSharp.Shared;
@@ -12,6 +16,16 @@ using schoolmusic_backend.Services;
 LibVLCSharp.Shared.Core.Initialize();
 
 var builder = WebApplication.CreateBuilder(args);
+
+// W Development generujemy losowy klucz, jeśli nie został ustawiony przez user-secrets.
+// Klucz zmienia się po restarcie i nigdy nie może być używany w środowisku produkcyjnym.
+if (builder.Environment.IsDevelopment() && string.IsNullOrWhiteSpace(builder.Configuration["Jwt:Key"]))
+{
+    builder.Configuration["Jwt:Key"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+}
+
+ProductionConfigurationValidator.Validate(builder.Configuration, builder.Environment);
+
 var connectionString = builder.Configuration.GetConnectionString("database")
     ?? builder.Configuration.GetSection("ConnectionString")["database"];
 var redisConnectionString = builder.Configuration.GetConnectionString("redis")
@@ -22,8 +36,13 @@ if (string.IsNullOrWhiteSpace(redisConnectionString) || redisConnectionString ==
 {
     redisConnectionString = "localhost:6379";
 }
-var jwtSettings = builder.Configuration.GetSection("Jwt");
-var key = Encoding.UTF8.GetBytes(jwtSettings["Key"] ?? "default_jwt_secret_key_development_only");
+var jwtSettings = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+var key = Encoding.UTF8.GetBytes(jwtSettings.Key);
+
+builder.Services.AddOptions<JwtOptions>()
+    .Bind(builder.Configuration.GetSection(JwtOptions.SectionName))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<JwtOptions>, JwtOptionsValidator>();
 
 builder.Services.AddAuthentication(options=>
 {
@@ -37,8 +56,8 @@ builder.Services.AddAuthentication(options=>
         ValidateAudience = true,
         ValidateLifetime = true,
         ValidateIssuerSigningKey = true,
-        ValidIssuer = jwtSettings["Issuer"],
-        ValidAudience = jwtSettings["Audience"],
+        ValidIssuer = jwtSettings.Issuer,
+        ValidAudience = jwtSettings.Audience,
         IssuerSigningKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(key),
        ClockSkew = TimeSpan.Zero
    };
@@ -46,6 +65,12 @@ builder.Services.AddAuthentication(options=>
 
 // Add services to the container.
 builder.Services.AddControllers();
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+});
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient("Spotify", client => client.Timeout = TimeSpan.FromSeconds(10));
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
@@ -147,6 +172,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ISystemStatusService, SystemStatusService>();
 builder.Services.AddScoped<IStatisticsService, StatisticsService>();
 builder.Services.AddSingleton<ILdapService, LdapService>();
+builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 
 var app = builder.Build();
 
@@ -179,6 +205,7 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-app.MapHub<schoolmusic_backend.Hubs.QueueHub>("/hubs/queue");
+// Hub udostępnia wyłącznie odczyt publicznego stanu kolejki i kiosku.
+app.MapHub<schoolmusic_backend.Hubs.QueueHub>("/hubs/queue").AllowAnonymous();
 
 app.Run();

@@ -5,7 +5,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Moq;
+using schoolmusic_backend.Configuration;
 using schoolmusic_backend.Controllers;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
@@ -44,7 +46,12 @@ public class LdapAuthTests
         IConfiguration configuration,
         ILdapService ldapService)
     {
-        var controller = new UsersController(context, configuration, ldapService)
+        var jwtOptions = configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+        var controller = new UsersController(
+            context,
+            configuration,
+            ldapService,
+            new JwtTokenService(Options.Create(jwtOptions)))
         {
             ControllerContext = new ControllerContext
             {
