@@ -214,8 +214,10 @@ if (ldapService is LdapService ldapServiceImpl)
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("Features:SwaggerEnabled"))
 {
-    app.MapOpenApi();
-    app.MapScalarApiReference();
+    // Dokumentacja API jest jawnie publiczna; domyślna polityka uwierzytelniania
+    // nie może blokować Scalar ani schematu OpenAPI.
+    app.MapOpenApi().AllowAnonymous();
+    app.MapScalarApiReference().AllowAnonymous();
 }
 
 app.UseCors("CorsPolicy");
