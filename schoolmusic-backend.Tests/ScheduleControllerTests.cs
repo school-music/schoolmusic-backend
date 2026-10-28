@@ -2,8 +2,10 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Moq;
 using schoolmusic_backend.Controllers;
 using schoolmusic_backend.Models;
+using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Tests;
 
@@ -165,6 +167,20 @@ public class ScheduleControllerTests
         var schedule = Assert.Single(db.WeeklySchedules);
         Assert.Equal((sbyte)2, schedule.Weekday);
         Assert.True(schedule.MusicEnabled);
+    }
+
+    [Fact]
+    public async Task UpdateWeeklyDay_NotifiesSchedulerAndInvalidatesScheduleCache()
+    {
+        await using var db = CreateContext();
+        var scheduler = new Mock<IBreakSchedulerService>();
+        var statusService = new Mock<ISystemStatusService>();
+        var controller = new WeeklyScheduleController(db, scheduler.Object, statusService.Object);
+
+        Assert.IsType<OkObjectResult>(await controller.UpdateWeeklyDay(2, new UpdateWeeklyDayDto(false)));
+
+        scheduler.Verify(service => service.NotifyScheduleChanged(), Times.Once);
+        statusService.Verify(service => service.InvalidateScheduleCache(), Times.Once);
     }
 
     [Fact]

@@ -22,6 +22,7 @@ public sealed class BreakSchedulerServiceTests
         public Mock<IQueueService> QueueService { get; } = new();
         public Mock<ISpotifyConnectPlaybackService> Spotify { get; } = new();
         public Mock<IAudioPlayerService> AudioPlayer { get; } = new();
+        public Mock<ISystemStatusService> StatusService { get; } = new();
 
         public Fixture()
         {
@@ -32,12 +33,11 @@ public sealed class BreakSchedulerServiceTests
             services.AddScoped(_ => QueueService.Object);
             services.AddScoped(_ => Spotify.Object);
             services.AddScoped(_ => AudioPlayer.Object);
-            var statusService = new Mock<ISystemStatusService>();
-            statusService.Setup(service => service.GetStatusAsync(It.IsAny<CancellationToken>()))
+            StatusService.Setup(service => service.GetStatusAsync(It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new SystemStatusDto(
                     SchoolState.Lesson, DateTime.UtcNow, null, null, 0, null, null,
                     true, null, "Lekcja", null, Array.Empty<TopTrackDto>()));
-            services.AddScoped(_ => statusService.Object);
+            services.AddScoped(_ => StatusService.Object);
 
             var hubClient = new Mock<IClientProxy>();
             hubClient.Setup(client => client.SendCoreAsync(
@@ -392,6 +392,53 @@ public sealed class BreakSchedulerServiceTests
         // Notify schedule changed should be idempotent and not throw
         service.NotifyScheduleChanged();
         service.NotifyScheduleChanged();
+        service.Dispose();
+    }
+
+    [Fact]
+    public void NotifyScheduleChanged_WhenCalledConcurrently_DoesNotThrow()
+    {
+        var service = new BreakSchedulerService(
+            Mock.Of<IServiceScopeFactory>(),
+            Mock.Of<IHubContext<QueueHub>>(),
+            NullLogger<BreakSchedulerService>.Instance);
+
+        var exception = Record.Exception(() =>
+            Parallel.For(0, 10_000, _ => service.NotifyScheduleChanged()));
+
+        Assert.Null(exception);
+        service.Dispose();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_NotificationWakesSchedulerBeforeAdaptiveDelay()
+    {
+        await using var fixture = new Fixture();
+        await fixture.Service.StartAsync(CancellationToken.None);
+        await WaitUntilAsync(() => GetStatusCallCount(fixture) >= 1);
+
+        fixture.Service.NotifyScheduleChanged();
+
+        await WaitUntilAsync(() => GetStatusCallCount(fixture) >= 2);
+        await fixture.Service.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenOneCycleFails_ContinuesAfterNotification()
+    {
+        await using var fixture = new Fixture();
+        fixture.StatusService.SetupSequence(service => service.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("test cycle failure"))
+            .ReturnsAsync(new SystemStatusDto(
+                SchoolState.Lesson, DateTime.UtcNow, null, null, 0, null, null,
+                true, null, "Lekcja", null, Array.Empty<TopTrackDto>()));
+
+        await fixture.Service.StartAsync(CancellationToken.None);
+        await WaitUntilAsync(() => GetStatusCallCount(fixture) >= 1);
+        fixture.Service.NotifyScheduleChanged();
+
+        await WaitUntilAsync(() => GetStatusCallCount(fixture) >= 2);
+        await fixture.Service.StopAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -411,5 +458,16 @@ public sealed class BreakSchedulerServiceTests
         await fixture.Tick();
 
         Assert.True(fixture.Service.NextDelay >= TimeSpan.FromSeconds(5));
+    }
+
+    private static int GetStatusCallCount(Fixture fixture) =>
+        fixture.StatusService.Invocations.Count(invocation => invocation.Method.Name == nameof(ISystemStatusService.GetStatusAsync));
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var attempt = 0; attempt < 100 && !condition(); attempt++)
+            await Task.Delay(10);
+
+        Assert.True(condition(), "Warunek testu nie został spełniony w wymaganym czasie.");
     }
 }

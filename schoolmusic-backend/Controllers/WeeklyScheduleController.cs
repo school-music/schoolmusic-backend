@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
+using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers
 {
@@ -79,6 +80,8 @@ namespace schoolmusic_backend.Controllers
     public class WeeklyScheduleController : ControllerBase
     {
         private readonly schoolmusicContext _context;
+        private readonly IBreakSchedulerService? _scheduler;
+        private readonly ISystemStatusService? _statusService;
 
         private static readonly Dictionary<sbyte, string> DayNames = new()
         {
@@ -91,9 +94,20 @@ namespace schoolmusic_backend.Controllers
             { 7, "Niedziela" }
         };
 
-        public WeeklyScheduleController(schoolmusicContext context)
+        public WeeklyScheduleController(
+            schoolmusicContext context,
+            IBreakSchedulerService? scheduler = null,
+            ISystemStatusService? statusService = null)
         {
             _context = context;
+            _scheduler = scheduler;
+            _statusService = statusService;
+        }
+
+        private void NotifyScheduleUpdated()
+        {
+            _statusService?.InvalidateScheduleCache();
+            _scheduler?.NotifyScheduleChanged();
         }
 
         /// <summary>
@@ -149,6 +163,7 @@ namespace schoolmusic_backend.Controllers
             }
 
             await _context.SaveChangesAsync();
+            NotifyScheduleUpdated();
             return Ok(new
             {
                 Message = $"Zaktualizowano konfigurację dla dnia {DayNames.GetValueOrDefault(day, day.ToString())}.",
@@ -245,6 +260,7 @@ namespace schoolmusic_backend.Controllers
             }
 
             await _context.SaveChangesAsync();
+            NotifyScheduleUpdated();
             return Ok(new
             {
                 Message = $"Zaktualizowano przerwę #{breakNo} w dniu {DayNames.GetValueOrDefault(day, day.ToString())}.",

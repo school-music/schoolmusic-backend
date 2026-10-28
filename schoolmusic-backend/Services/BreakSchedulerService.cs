@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
+using System.Threading.Channels;
 
 namespace schoolmusic_backend.Services;
 
@@ -20,7 +21,12 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
     private readonly IHubContext<QueueHub> _hubContext;
     private readonly ILogger<BreakSchedulerService> _logger;
     private readonly IAudioPlayerService? _audioPlayer;
-    private readonly SemaphoreSlim _wakeUpSignal = new(0, 1);
+    private readonly Channel<bool> _wakeUpSignal = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
+    {
+        FullMode = BoundedChannelFullMode.DropWrite,
+        SingleReader = true,
+        SingleWriter = false
+    });
     private readonly object _planLock = new();
     private TimeSpan _nextDelay = TimeSpan.FromSeconds(5);
     private SystemStatusDto? _lastKioskStatus;
@@ -71,16 +77,8 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
 
     public void NotifyScheduleChanged()
     {
-        try
-        {
-            if (_wakeUpSignal.CurrentCount == 0)
-            {
-                _wakeUpSignal.Release();
-            }
-        }
-        catch (ObjectDisposedException)
-        {
-        }
+        if (_wakeUpSignal.Writer.TryWrite(true))
+            _logger.LogDebug("Scheduler received a schedule change notification.");
     }
 
     public async Task<bool> SkipCurrentTrackAsync()
@@ -131,12 +129,31 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
 
             try
             {
-                await _wakeUpSignal.WaitAsync(_nextDelay, stoppingToken);
+                await WaitForNextTickAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 break;
             }
+        }
+    }
+
+    private async Task WaitForNextTickAsync(CancellationToken stoppingToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        timeout.CancelAfter(_nextDelay);
+
+        try
+        {
+            await _wakeUpSignal.Reader.ReadAsync(timeout.Token);
+            while (_wakeUpSignal.Reader.TryRead(out _))
+            {
+                // Wiele zmian harmonogramu może zostać obsłużonych przez jeden kolejny cykl.
+            }
+        }
+        catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+        {
+            // Upłynął adaptacyjny czas oczekiwania — wykonujemy kolejny standardowy cykl.
         }
     }
 
@@ -675,8 +692,8 @@ public sealed class BreakSchedulerService : BackgroundService, IBreakSchedulerSe
 
     public override void Dispose()
     {
-        _wakeUpSignal.Dispose();
         base.Dispose();
+        _wakeUpSignal.Writer.TryComplete();
     }
 
     private static bool HasKioskStatusChanged(SystemStatusDto previous, SystemStatusDto current) =>

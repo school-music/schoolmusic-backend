@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
+using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers;
 
@@ -26,8 +27,17 @@ public record UpdateBreakTemplateDto(int BreakNumber, TimeOnly StartsTime, TimeO
 [Route("api/breaks/templates")]
 [ApiController]
 [Authorize(Roles = "admin,head_admin")]
-public class BreakTemplatesController(schoolmusicContext context) : ControllerBase
+public class BreakTemplatesController(
+    schoolmusicContext context,
+    IBreakSchedulerService? scheduler = null,
+    ISystemStatusService? statusService = null) : ControllerBase
 {
+    private void NotifyScheduleUpdated()
+    {
+        statusService?.InvalidateScheduleCache();
+        scheduler?.NotifyScheduleChanged();
+    }
+
     /// <summary>
     /// Pobiera listę wszystkich szablonów przerw posortowanych według numeru przerwy.
     /// </summary>
@@ -72,6 +82,7 @@ public class BreakTemplatesController(schoolmusicContext context) : ControllerBa
 
         context.BreakTemplates.Add(template);
         await context.SaveChangesAsync();
+        NotifyScheduleUpdated();
 
         return Created("/api/breaks/templates", ToDto(template));
     }
@@ -130,12 +141,14 @@ public class BreakTemplatesController(schoolmusicContext context) : ControllerBa
                 await transaction.CommitAsync();
             }
 
+            NotifyScheduleUpdated();
             return Ok(ToDto(updatedTemplate));
         }
 
         template.StartsTime = dto.StartsTime;
         template.EndsTime = dto.EndsTime;
         await context.SaveChangesAsync();
+        NotifyScheduleUpdated();
 
         return Ok(ToDto(template));
     }
@@ -160,6 +173,7 @@ public class BreakTemplatesController(schoolmusicContext context) : ControllerBa
 
         context.BreakTemplates.Remove(template);
         await context.SaveChangesAsync();
+        NotifyScheduleUpdated();
         return NoContent();
     }
 

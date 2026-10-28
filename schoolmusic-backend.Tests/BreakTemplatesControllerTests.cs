@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Moq;
 using schoolmusic_backend.Controllers;
 using schoolmusic_backend.Models;
+using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Tests;
 
@@ -44,6 +46,23 @@ public class BreakTemplatesControllerTests
         Assert.Equal(9, dto.BreakNumber);
         Assert.Equal(new TimeOnly(12, 0), dto.StartsTime);
         Assert.Equal(1, await context.BreakTemplates.CountAsync());
+    }
+
+    [Fact]
+    public async Task CreateBreakTemplate_NotifiesSchedulerAndInvalidatesScheduleCache()
+    {
+        await using var context = new schoolmusicContext(new DbContextOptionsBuilder<schoolmusicContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options);
+        var scheduler = new Mock<IBreakSchedulerService>();
+        var statusService = new Mock<ISystemStatusService>();
+        var controller = new BreakTemplatesController(context, scheduler.Object, statusService.Object);
+
+        await controller.CreateBreakTemplate(
+            new CreateBreakTemplateDto(9, new TimeOnly(12, 0), new TimeOnly(12, 15)));
+
+        scheduler.Verify(service => service.NotifyScheduleChanged(), Times.Once);
+        statusService.Verify(service => service.InvalidateScheduleCache(), Times.Once);
     }
 
     [Theory]
