@@ -8,6 +8,17 @@ namespace schoolmusic_backend.Configuration;
 /// </summary>
 public static class ProductionConfigurationValidator
 {
+    // Wartości z .env.example oraz typowe hasła demonstracyjne nie mogą trafić na produkcję.
+    private static readonly HashSet<string> KnownPasswords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "secret",
+        "password",
+        "changeme",
+        "UZUPELNIJ_LOSOWYM_HASLEM_BAZY",
+        "UZUPELNIJ_LOSOWYM_HASLEM_REDIS",
+        "UZUPELNIJ_LOSOWYM_HASLEM_ROOT"
+    };
+
     public static void Validate(IConfiguration configuration, IWebHostEnvironment environment)
     {
         if (!environment.IsProduction())
@@ -46,7 +57,7 @@ public static class ProductionConfigurationValidator
             if (string.Equals(user, "root", StringComparison.OrdinalIgnoreCase))
                 errors.Add("Aplikacja produkcyjna nie może łączyć się z bazą danych jako użytkownik root.");
             if (string.IsNullOrWhiteSpace(password) ||
-                string.Equals(password, "secret", StringComparison.OrdinalIgnoreCase))
+                KnownPasswords.Contains(password))
                 errors.Add("Hasło bazy danych jest brakujące lub używa znanej wartości domyślnej.");
         }
         catch (ArgumentException)
@@ -70,8 +81,9 @@ public static class ProductionConfigurationValidator
         try
         {
             var options = ConfigurationOptions.Parse(connectionString);
-            if (string.IsNullOrWhiteSpace(options.Password))
-                errors.Add("Redis w środowisku produkcyjnym musi wymagać hasła.");
+            if (string.IsNullOrWhiteSpace(options.Password) ||
+                KnownPasswords.Contains(options.Password))
+                errors.Add("Redis w środowisku produkcyjnym musi wymagać hasła innego niż wartość domyślna.");
         }
         catch (ArgumentException)
         {

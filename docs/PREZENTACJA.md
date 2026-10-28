@@ -14,7 +14,7 @@
 | **0:00 - 1:30** | 1. Pomysł i cel projektu | Lider / Speaker | Dlaczego radiowęzły w szkołach nie działają i jak to zmieniamy. |
 | **1:30 - 3:00** | 2. Architektura systemu | Architekt / Backend | Trzy filary: .NET 10 API, Redis (cache/kolejki), MariaDB (dane trwał). |
 | **3:00 - 4:30** | 3. Projekt bazy danych | Baza danych / Backend | Relacje, ograniczenia integralności, optymalizacja zapytań. |
-| **4:30 - 6:00** | 4. Aplikacja serwerowa (Backend) | Główny programista | .NET 10, C# 14, bezpieczeństwo JWT, SignalR, 242 testy jednostkowe. |
+| **4:30 - 6:00** | 4. Aplikacja serwerowa (Backend) | Główny programista | .NET 10, C# 14, bezpieczeństwo JWT, SignalR, 245 testów jednostkowych. |
 | **6:00 - 7:30** | 5. Panel administracyjny WWW | Frontend / Web dev | Pełna kontrola dla dyrekcji i radiowęzłowców (dźwięk, plany, blokady). |
 | **7:30 - 9:00** | 6. Aplikacja mobilna | Mobile dev | Narzędzie w rękach ucznia: szybkie głosowanie, podgląd na żywo. |
 | **9:00 - 10:30**| 7. Mechanizm głosowania | Backend dev | Demokratyczny algorytm rankingowy, anty-spam, cooldown 24h. |
@@ -132,7 +132,7 @@ Backend został zaimplementowany przy użyciu platformy **.NET 10** z zachowanie
   * `mod`: moderator (zatwierdzanie/odrzucanie propozycji, blokowanie spamerów).
   * `admin`: radiowęzłowiec (pełna kontrola playbacku, głośności, harmonogramu).
   * `head_admin`: administrator systemu (zarządzanie kontami i konfiguracją).
-* **Automatyczne testy jakościowe:** 242 testy jednostkowe i integracyjnych (xUnit, Moq, InMemoryDatabase), weryfikujących logikę harmonogramu, moderację, kolejkowanie i bezpieczeństwo.
+* **Automatyczne testy jakościowe:** 245 testów jednostkowych i integracyjnych (xUnit, Moq, InMemoryDatabase), weryfikujących logikę harmonogramu, moderację, kolejkowanie i bezpieczeństwo.
 
 ---
 

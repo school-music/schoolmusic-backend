@@ -25,7 +25,8 @@ public sealed class JwtOptionsValidator(IWebHostEnvironment environment) : IVali
     {
         "YOUR_SECRET_KEY_HERE",
         "default_jwt_secret_key_development_only",
-        "schoolmusic_super_secret_jwt_key_2026_dev!"
+        "schoolmusic_super_secret_jwt_key_2026_dev!",
+        "UZUPELNIJ_LOSOWYM_KLUCZEM_MINIMUM_32_BAJTY"
     };
 
     public ValidateOptionsResult Validate(string? name, JwtOptions options)

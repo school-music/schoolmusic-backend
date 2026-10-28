@@ -27,6 +27,7 @@ public sealed class SecurityConfigurationTests
     [InlineData("YOUR_SECRET_KEY_HERE")]
     [InlineData("default_jwt_secret_key_development_only")]
     [InlineData("schoolmusic_super_secret_jwt_key_2026_dev!")]
+    [InlineData("UZUPELNIJ_LOSOWYM_KLUCZEM_MINIMUM_32_BAJTY")]
     public void JwtOptionsValidator_ProductionRejectsMissingWeakOrKnownKey(string key)
     {
         var validator = new JwtOptionsValidator(CreateEnvironment("Production"));
@@ -74,6 +75,25 @@ public sealed class SecurityConfigurationTests
 
         Assert.Contains("root", exception.Message);
         Assert.Contains("Redis", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("UZUPELNIJ_LOSOWYM_HASLEM_BAZY", "redis:6379,password=StrongRedisPassword!2026")]
+    [InlineData("StrongDatabasePassword!2026", "redis:6379,password=UZUPELNIJ_LOSOWYM_HASLEM_REDIS")]
+    public void ProductionConfigurationValidator_RejectsEnvExamplePlaceholders(string databasePassword, string redisConnection)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionString:database"] = $"server=db;database=schoolmusic;user=schoolmusic;password={databasePassword};",
+                ["ConnectionString:redis"] = redisConnection
+            })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ProductionConfigurationValidator.Validate(configuration, CreateEnvironment("Production")));
+
+        Assert.Contains("domyśl", exception.Message);
     }
 
     [Fact]
