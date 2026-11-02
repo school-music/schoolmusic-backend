@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using schoolmusic_backend.Models;
 using System.IdentityModel.Tokens.Jwt;
@@ -84,7 +84,7 @@ public class UsersController : ControllerBase
 
     /// <summary>
     /// Loguje użytkownika do systemu i zwraca token JWT z przypisaną rolą.
-    /// Wspiera logowanie lokalne oraz automatyczny fallback do szkolnego katalogu LDAP.
+    /// Wspiera logowanie lokalne oraz logowanie przez szkolny katalog LDAP.
     /// </summary>
     /// <param name="userLoginDto">Dane logowania (login i hasło).</param>
     /// <returns>Token JWT i status operacji.</returns>
@@ -107,11 +107,17 @@ public class UsersController : ControllerBase
             bool isPasswordCorrect = BCrypt.Net.BCrypt.Verify(userLoginDto.password, existingUser.UserPassword);
             bool authenticatedWithLdap = false;
 
-            // Jeśli hasło lokalne nie pasuje, ale LDAP jest włączony, sprawdzamy w katalogu LDAP
-            if (!isPasswordCorrect && _ldapService.IsEnabled)
+            // Fallback do katalogu LDAP jest dozwolony wyłącznie dla kont, które są już
+            // powiązane z kontem szkolnym (mają zapisany ldap_dn). Dzięki temu hasło z katalogu
+            // nie może odblokować konta lokalnego o tej samej nazwie (np. konta moderatora).
+            if (!isPasswordCorrect
+                && _ldapService.IsEnabled
+                && !string.IsNullOrWhiteSpace(existingUser.LdapDn))
             {
                 var ldapFallback = await _ldapService.AuthenticateAsync(normalizedName, userLoginDto.password);
-                if (ldapFallback.Success && ldapFallback.User != null)
+                if (ldapFallback.Success
+                    && ldapFallback.User != null
+                    && LdapIdentityMatches(existingUser.LdapDn, ldapFallback.User))
                 {
                     isPasswordCorrect = true;
                     authenticatedWithLdap = true;
@@ -147,7 +153,8 @@ public class UsersController : ControllerBase
                     UserPassword = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N")),
                     CreatedAt = DateTime.UtcNow,
                     RankId = 1, // 'user'
-                    PasswordChangedAt = DateTime.UtcNow
+                    PasswordChangedAt = DateTime.UtcNow,
+                    LdapDn = ldapResult.User.DistinguishedName
                 };
 
                 try
@@ -162,7 +169,7 @@ public class UsersController : ControllerBase
                     _context.Entry(newUser).State = EntityState.Detached;
                     var parallelUser = await _context.Users.Include(u => u.Rank)
                         .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
-                    if (parallelUser != null)
+                    if (parallelUser != null && LdapIdentityMatches(parallelUser.LdapDn, ldapResult.User))
                     {
                         return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
                     }
@@ -219,6 +226,20 @@ public class UsersController : ControllerBase
 
         if (existingUser != null)
         {
+            // Nazwa konta może kolidować z kontem lokalnym lub z innym kontem szkolnym.
+            // Logowanie przez katalog jest dozwolone tylko wtedy, gdy konto jest już powiązane
+            // z TYM SAMYM kontem w katalogu, które właśnie potwierdziło hasło.
+            if (!LdapIdentityMatches(existingUser.LdapDn, ldapResult.User))
+            {
+                _logger?.LogWarning(
+                    "Odrzucono logowanie LDAP: login koliduje z istniejącym kontem {UserId}, które nie jest powiązane z kontem w katalogu.",
+                    existingUser.Id);
+                return Conflict(new
+                {
+                    Message = "Ten login jest już zajęty przez konto lokalne lub inne konto szkolne. Skontaktuj się z administratorem."
+                });
+            }
+
             var isBanned = await _context.BannedUsers.AnyAsync(b => b.UserId == existingUser.Id);
             if (isBanned)
             {
@@ -236,7 +257,8 @@ public class UsersController : ControllerBase
             UserPassword = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N")),
             CreatedAt = DateTime.UtcNow,
             RankId = 1,
-            PasswordChangedAt = DateTime.UtcNow
+            PasswordChangedAt = DateTime.UtcNow,
+            LdapDn = ldapResult.User.DistinguishedName
         };
 
         try
@@ -251,7 +273,7 @@ public class UsersController : ControllerBase
             _context.Entry(newUser).State = EntityState.Detached;
             var parallelUser = await _context.Users.Include(u => u.Rank)
                 .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
-            if (parallelUser != null)
+            if (parallelUser != null && LdapIdentityMatches(parallelUser.LdapDn, ldapResult.User))
             {
                 return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
             }
@@ -358,6 +380,23 @@ public class UsersController : ControllerBase
         _logger?.LogInformation("Usunięto konto użytkownika {UserId}.", currentUserId);
 
         return NoContent();
+    }
+
+    /// <summary>
+    /// Sprawdza, czy konto lokalne jest powiązane z tym samym kontem w katalogu LDAP.
+    /// Oba identyfikatory muszą być znane, a DN musi się zgadzać (porównanie bez rozróżniania wielkości liter).
+    /// </summary>
+    private static bool LdapIdentityMatches(string? localLdapDn, LdapUser ldapUser)
+    {
+        if (string.IsNullOrWhiteSpace(localLdapDn) || string.IsNullOrWhiteSpace(ldapUser.DistinguishedName))
+        {
+            return false;
+        }
+
+        var localDn = localLdapDn.Trim();
+        var directoryDn = ldapUser.DistinguishedName.Trim();
+
+        return string.Equals(localDn, directoryDn, StringComparison.OrdinalIgnoreCase);
     }
 
     private IActionResult GenerateLoginResponse(User user, string message, bool isLdap = false)
