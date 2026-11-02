@@ -6,11 +6,17 @@ namespace schoolmusic_backend.Services;
 /// <summary>
 /// Informacje o użytkowniku pobrane ze szkolnego katalogu LDAP / Active Directory.
 /// </summary>
+/// <param name="Username">Znormalizowany login szkolny (np. imie.nazwisko).</param>
+/// <param name="DistinguishedName">
+/// Stabilny identyfikator konta w katalogu (DN). Służy do powiązania konta lokalnego z kontem szkolnym.
+/// Może być pusty, gdy konto nie zostało znalezione przez wyszukiwanie w katalogu.
+/// </param>
 public record LdapUser(
     string Username,
     string? DisplayName,
     string? Email,
-    IReadOnlyList<string> Groups
+    IReadOnlyList<string> Groups,
+    string? DistinguishedName = null
 );
 
 /// <summary>
@@ -154,7 +160,12 @@ public class LdapService : ILdapService
                         Username: normalizedLogin,
                         DisplayName: userSec["DisplayName"] ?? normalizedLogin,
                         Email: userSec["Email"] ?? $"{normalizedLogin}@szkola.edu.pl",
-                        Groups: configuredGroups
+                        Groups: configuredGroups,
+                        // W trybie symulacyjnym nie ma prawdziwego katalogu, ale nadal potrzebujemy
+                        // stabilnego identyfikatora, żeby powiązanie konta działało tak samo jak na produkcji.
+                        DistinguishedName: userSec["DistinguishedName"] is { Length: > 0 } simulatedDn
+                            ? simulatedDn
+                            : $"uid={normalizedLogin},ou=Users,dc=szkola,dc=edu,dc=pl"
                     );
 
                     // Sprawdzenie wymaganej grupy jeśli skonfigurowana
@@ -226,6 +237,7 @@ public class LdapService : ILdapService
 
             string? displayName = normalizedLogin;
             string? email = normalizedLogin.Contains('@') ? normalizedLogin : $"{normalizedLogin}@{domain ?? "szkola.edu.pl"}";
+            string? distinguishedName = null;
             var groups = new List<string>();
 
             // Opcjonalne wyszukanie dodatkowych atrybutów jeśli podano SearchBase
@@ -252,6 +264,10 @@ public class LdapService : ILdapService
                         displayName = entry.GetStringValueOrDefault("displayName", normalizedLogin);
                         email = entry.GetStringValueOrDefault("mail", $"{normalizedLogin}@{domain ?? "szkola.edu.pl"}");
 
+                        // DN jest stabilnym identyfikatorem konta w katalogu. Bez niego nie da się
+                        // bezpiecznie powiązać konta lokalnego z kontem szkolnym.
+                        distinguishedName = string.IsNullOrWhiteSpace(entry.Dn) ? null : entry.Dn;
+
                         var memberOfAttr = entry.GetOrDefault("memberOf", null!);
                         if (memberOfAttr != null)
                         {
@@ -270,7 +286,7 @@ public class LdapService : ILdapService
 
             connection.Disconnect();
 
-            var ldapUser = new LdapUser(normalizedLogin, displayName, email, groups);
+            var ldapUser = new LdapUser(normalizedLogin, displayName, email, groups, distinguishedName);
 
             // Sprawdzenie przynależności do wymaganej grupy
             var requiredGroup = _configuration["Ldap:RequiredGroup"];

@@ -9,6 +9,7 @@ namespace schoolmusic_backend.Models;
 [Table("users")]
 [Index("RankId", Name = "idx_users_rank")]
 [Index("UserLogin", Name = "uniq_user_login", IsUnique = true)]
+[Index("LdapDn", Name = "uniq_users_ldap_dn", IsUnique = true)]
 public partial class User
 {
     [Key]
@@ -30,6 +31,14 @@ public partial class User
 
     [Column("password_changed_at", TypeName = "datetime")]
     public DateTime? PasswordChangedAt { get; set; }
+
+    /// <summary>
+    /// Distinguished Name konta w szkolnym katalogu LDAP. Wartość pusta oznacza konto lokalne,
+    /// którego nie wolno uwierzytelniać przez katalog.
+    /// </summary>
+    [Column("ldap_dn")]
+    [StringLength(512)]
+    public string? LdapDn { get; set; }
 
     [InverseProperty("User")]
     public virtual ICollection<BannedUser> BannedUsers { get; set; } = new List<BannedUser>();
