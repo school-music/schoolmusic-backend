@@ -17,6 +17,9 @@ namespace schoolmusic_backend.Controllers;
 [Authorize]
 public class UsersController : ControllerBase
 {
+    /// <summary>Domyślna rola przyznawana automatycznie utworzonym kontom (ranks.id = 1).</summary>
+    private const int DefaultRankId = 1;
+
     private readonly schoolmusicContext _context;
     private readonly IConfiguration _configuration;
     private readonly ILdapService _ldapService;
@@ -147,29 +150,19 @@ public class UsersController : ControllerBase
             if (ldapResult.Success && ldapResult.User != null)
             {
                 var username = ldapResult.User.Username;
-                var newUser = new User
-                {
-                    UserLogin = username,
-                    UserPassword = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N")),
-                    CreatedAt = DateTime.UtcNow,
-                    RankId = 1, // 'user'
-                    PasswordChangedAt = DateTime.UtcNow,
-                    LdapDn = ldapResult.User.DistinguishedName
-                };
 
                 try
                 {
-                    _context.Users.Add(newUser);
-                    await _context.SaveChangesAsync();
-                    await _context.Entry(newUser).Reference(u => u.Rank).LoadAsync();
-                    return GenerateLoginResponse(newUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                    var createdUser = await ProvisionLdapUserAsync(username, ldapResult.User.DistinguishedName);
+                    if (createdUser != null)
+                    {
+                        return GenerateLoginResponse(createdUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                    }
                 }
                 catch (DbUpdateException)
                 {
-                    _context.Entry(newUser).State = EntityState.Detached;
-                    var parallelUser = await _context.Users.Include(u => u.Rank)
-                        .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
-                    if (parallelUser != null && LdapIdentityMatches(parallelUser.LdapDn, ldapResult.User))
+                    var parallelUser = await FindUserForLdapIdentityAsync(username, ldapResult.User);
+                    if (parallelUser != null)
                     {
                         return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
                     }
@@ -251,34 +244,28 @@ public class UsersController : ControllerBase
         }
 
         // Auto-provisioning nowego ucznia
-        var newUser = new User
-        {
-            UserLogin = username,
-            UserPassword = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N")),
-            CreatedAt = DateTime.UtcNow,
-            RankId = 1,
-            PasswordChangedAt = DateTime.UtcNow,
-            LdapDn = ldapResult.User.DistinguishedName
-        };
-
         try
         {
-            _context.Users.Add(newUser);
-            await _context.SaveChangesAsync();
-            await _context.Entry(newUser).Reference(u => u.Rank).LoadAsync();
-            return GenerateLoginResponse(newUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+            var createdUser = await ProvisionLdapUserAsync(username, ldapResult.User.DistinguishedName);
+            if (createdUser != null)
+            {
+                return GenerateLoginResponse(createdUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+            }
         }
         catch (DbUpdateException)
         {
-            _context.Entry(newUser).State = EntityState.Detached;
-            var parallelUser = await _context.Users.Include(u => u.Rank)
-                .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
-            if (parallelUser != null && LdapIdentityMatches(parallelUser.LdapDn, ldapResult.User))
+            var parallelUser = await FindUserForLdapIdentityAsync(username, ldapResult.User);
+            if (parallelUser != null)
             {
                 return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
             }
             throw;
         }
+
+        return Conflict(new
+        {
+            Message = "Ten login jest już zajęty przez konto lokalne lub inne konto szkolne. Skontaktuj się z administratorem."
+        });
     }
 
     /// <summary>
@@ -330,7 +317,7 @@ public class UsersController : ControllerBase
             UserLogin = dto.name,
             UserPassword = BCrypt.Net.BCrypt.HashPassword(dto.password),
             CreatedAt = DateTime.UtcNow,
-            RankId = 1,
+            RankId = DefaultRankId,
             PasswordChangedAt = DateTime.UtcNow,
         };
 
@@ -380,6 +367,71 @@ public class UsersController : ControllerBase
         _logger?.LogInformation("Usunięto konto użytkownika {UserId}.", currentUserId);
 
         return NoContent();
+    }
+
+    /// <summary>
+    /// Tworzy konto lokalne powiązane z kontem w katalogu szkolnym.
+    /// Zwraca null, gdy konto o tej nazwie już istnieje (nawet jeśli nie jest jeszcze śledzone przez DbContext),
+    /// oraz gdy katalog nie podał stabilnego identyfikatora (DN).
+    /// </summary>
+    private async Task<User?> ProvisionLdapUserAsync(string username, string? distinguishedName)
+    {
+        // Bez DN nie da się bezpiecznie powiązać konta, więc go nie tworzymy.
+        if (string.IsNullOrWhiteSpace(distinguishedName))
+        {
+            _logger?.LogWarning("Odrzucono provisioning konta LDAP: katalog nie zwrócił DN.");
+            return null;
+        }
+
+        var loginTaken = await _context.Users
+            .AnyAsync(u => u.UserLogin.ToLower() == username.ToLower());
+        if (loginTaken)
+        {
+            return null;
+        }
+
+        var newUser = new User
+        {
+            UserLogin = username,
+            UserPassword = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N")),
+            CreatedAt = DateTime.UtcNow,
+            RankId = DefaultRankId,
+            PasswordChangedAt = DateTime.UtcNow,
+            LdapDn = distinguishedName
+        };
+
+        // Rola jest ustawiana jawnie, bo Encja nie używa proxy leniwego ładowania.
+        newUser.Rank = await ResolveRankAsync(DefaultRankId);
+
+        _context.Users.Add(newUser);
+        await _context.SaveChangesAsync();
+
+        return newUser;
+    }
+
+    /// <summary>
+    /// Ponownie odczytuje konto po konflikcie zapisu (równoległe pierwsze logowanie)
+    /// i zwraca je tylko wtedy, gdy jest powiązane z tym samym kontem w katalogu.
+    /// </summary>
+    private async Task<User?> FindUserForLdapIdentityAsync(string username, LdapUser ldapUser)
+    {
+        var parallelUser = await _context.Users.Include(u => u.Rank)
+            .FirstOrDefaultAsync(u => u.UserLogin.ToLower() == username.ToLower());
+
+        if (parallelUser != null && LdapIdentityMatches(parallelUser.LdapDn, ldapUser))
+        {
+            return parallelUser;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Pobiera encję roli, żeby odpowiedź logowania i generowanie tokenu nie wymagały nawigacji po null.
+    /// </summary>
+    private Task<Rank?> ResolveRankAsync(int rankId)
+    {
+        return _context.Ranks.FirstOrDefaultAsync(r => r.Id == rankId);
     }
 
     /// <summary>
