@@ -149,24 +149,29 @@ public class UsersController : ControllerBase
             var ldapResult = await _ldapService.AuthenticateAsync(normalizedName, userLoginDto.password);
             if (ldapResult.Success && ldapResult.User != null)
             {
-                var username = ldapResult.User.Username;
-
+                User? createdUser = null;
                 try
                 {
-                    var createdUser = await ProvisionLdapUserAsync(username, ldapResult.User.DistinguishedName);
-                    if (createdUser != null)
-                    {
-                        return GenerateLoginResponse(createdUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
-                    }
+                    createdUser = await ProvisionLdapUserAsync(ldapResult.User.Username, ldapResult.User.DistinguishedName);
                 }
                 catch (DbUpdateException)
                 {
-                    var parallelUser = await FindUserForLdapIdentityAsync(username, ldapResult.User);
-                    if (parallelUser != null)
+                    createdUser = await FindUserForLdapIdentityAsync(ldapResult.User.Username, ldapResult.User);
+                }
+
+                if (createdUser != null)
+                {
+                    return GenerateLoginResponse(createdUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                }
+
+                // Login koliduje z istniejącym kontem, którego nie wolno przejąć przez katalog.
+                if (await _context.Users.AnyAsync(u => u.UserLogin.ToLower() == ldapResult.User.Username.ToLower()))
+                {
+                    _logger?.LogWarning("Odrzucono provisioning LDAP: login koliduje z istniejącym kontem.");
+                    return Conflict(new
                     {
-                        return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
-                    }
-                    throw;
+                        Message = "Ten login jest już zajęty przez konto lokalne lub inne konto szkolne. Skontaktuj się z administratorem."
+                    });
                 }
             }
         }
@@ -244,24 +249,26 @@ public class UsersController : ControllerBase
         }
 
         // Auto-provisioning nowego ucznia
+        User? provisionedUser = null;
         try
         {
-            var createdUser = await ProvisionLdapUserAsync(username, ldapResult.User.DistinguishedName);
-            if (createdUser != null)
-            {
-                return GenerateLoginResponse(createdUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
-            }
+            provisionedUser = await ProvisionLdapUserAsync(username, ldapResult.User.DistinguishedName);
         }
         catch (DbUpdateException)
         {
-            var parallelUser = await FindUserForLdapIdentityAsync(username, ldapResult.User);
-            if (parallelUser != null)
+            provisionedUser = await FindUserForLdapIdentityAsync(username, ldapResult.User);
+            if (provisionedUser == null)
             {
-                return GenerateLoginResponse(parallelUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+                throw;
             }
-            throw;
         }
 
+        if (provisionedUser != null)
+        {
+            return GenerateLoginResponse(provisionedUser, "Zalogowano poprawnie przez konto szkolne (LDAP)", isLdap: true);
+        }
+
+        // Brak DN lub zajęty login: nie tworzymy ani nie przejmujemy konta.
         return Conflict(new
         {
             Message = "Ten login jest już zajęty przez konto lokalne lub inne konto szkolne. Skontaktuj się z administratorem."
@@ -371,9 +378,11 @@ public class UsersController : ControllerBase
 
     /// <summary>
     /// Tworzy konto lokalne powiązane z kontem w katalogu szkolnym.
-    /// Zwraca null, gdy konto o tej nazwie już istnieje (nawet jeśli nie jest jeszcze śledzone przez DbContext),
-    /// oraz gdy katalog nie podał stabilnego identyfikatora (DN).
+    /// Zwraca null, gdy konto o tej nazwie już istnieje oraz gdy katalog nie podał stabilnego identyfikatora (DN).
     /// </summary>
+    /// <param name="username">Znormalizowany login z katalogu.</param>
+    /// <param name="distinguishedName">DN konta w katalogu, wymagany do bezpiecznego powiązania.</param>
+    /// <returns>Utworzone konto albo null, gdy provisioning nie jest dozwolony.</returns>
     private async Task<User?> ProvisionLdapUserAsync(string username, string? distinguishedName)
     {
         // Bez DN nie da się bezpiecznie powiązać konta, więc go nie tworzymy.
@@ -390,6 +399,8 @@ public class UsersController : ControllerBase
             return null;
         }
 
+        var rank = await ResolveRankAsync(DefaultRankId);
+
         var newUser = new User
         {
             UserLogin = username,
@@ -401,7 +412,10 @@ public class UsersController : ControllerBase
         };
 
         // Rola jest ustawiana jawnie, bo Encja nie używa proxy leniwego ładowania.
-        newUser.Rank = await ResolveRankAsync(DefaultRankId);
+        if (rank != null)
+        {
+            newUser.Rank = rank;
+        }
 
         _context.Users.Add(newUser);
         await _context.SaveChangesAsync();
@@ -413,6 +427,9 @@ public class UsersController : ControllerBase
     /// Ponownie odczytuje konto po konflikcie zapisu (równoległe pierwsze logowanie)
     /// i zwraca je tylko wtedy, gdy jest powiązane z tym samym kontem w katalogu.
     /// </summary>
+    /// <param name="username">Login próbujący się zalogować.</param>
+    /// <param name="ldapUser">Konto zwrócone przez katalog po udanym bindzie.</param>
+    /// <returns>Istniejące konto powiązane z tym samym DN albo null.</returns>
     private async Task<User?> FindUserForLdapIdentityAsync(string username, LdapUser ldapUser)
     {
         var parallelUser = await _context.Users.Include(u => u.Rank)
@@ -429,6 +446,8 @@ public class UsersController : ControllerBase
     /// <summary>
     /// Pobiera encję roli, żeby odpowiedź logowania i generowanie tokenu nie wymagały nawigacji po null.
     /// </summary>
+    /// <param name="rankId">Identyfikator roli (ranks.id).</param>
+    /// <returns>Encja roli albo null, gdy rola nie istnieje.</returns>
     private Task<Rank?> ResolveRankAsync(int rankId)
     {
         return _context.Ranks.FirstOrDefaultAsync(r => r.Id == rankId);
@@ -438,6 +457,9 @@ public class UsersController : ControllerBase
     /// Sprawdza, czy konto lokalne jest powiązane z tym samym kontem w katalogu LDAP.
     /// Oba identyfikatory muszą być znane, a DN musi się zgadzać (porównanie bez rozróżniania wielkości liter).
     /// </summary>
+    /// <param name="localLdapDn">DN zapisany na koncie lokalnym.</param>
+    /// <param name="ldapUser">Konto zwrócone przez katalog.</param>
+    /// <returns>True tylko przy zgodnych, niepustych identyfikatorach.</returns>
     private static bool LdapIdentityMatches(string? localLdapDn, LdapUser ldapUser)
     {
         if (string.IsNullOrWhiteSpace(localLdapDn) || string.IsNullOrWhiteSpace(ldapUser.DistinguishedName))
@@ -451,6 +473,13 @@ public class UsersController : ControllerBase
         return string.Equals(localDn, directoryDn, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Buduje odpowiedź logowania wraz z tokenem JWT.
+    /// </summary>
+    /// <param name="user">Uwierzytelnione konto.</param>
+    /// <param name="message">Komunikat zwracany klientowi.</param>
+    /// <param name="isLdap">Czy uwierzytelnienie odbyło się przez katalog szkolny.</param>
+    /// <returns>200 OK z tokenem i metadanymi konta.</returns>
     private IActionResult GenerateLoginResponse(User user, string message, bool isLdap = false)
     {
         string tokenString = _jwtTokenService.CreateToken(user, isLdap);
