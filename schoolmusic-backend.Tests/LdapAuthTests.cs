@@ -18,6 +18,7 @@ namespace schoolmusic_backend.Tests;
 public class LdapAuthTests
 {
     private const string JanKowalskiDn = "uid=jan.kowalski,ou=Users,dc=szkola,dc=edu,dc=pl";
+    private const string TestJwtKey = "SuperSecretKeyForTestingJwtTokens1234567890!";
 
     private static schoolmusicContext CreateInMemoryContext(string dbName)
     {
@@ -43,6 +44,27 @@ public class LdapAuthTests
             .Build();
     }
 
+    /// <summary>
+    /// Konfiguracja z poprawnym kompletem ustawień JWT. Każdy test, który może zakończyć się
+    /// wydaniem tokenu, musi jej używać - inaczej JwtTokenService rzuca IDX10703 (klucz zerowej długości).
+    /// </summary>
+    private static IConfiguration CreateJwtConfiguration(params (string Key, string? Value)[] overrides)
+    {
+        var settings = new Dictionary<string, string?>
+        {
+            ["Jwt:Key"] = TestJwtKey,
+            ["Jwt:Issuer"] = "TestIssuer",
+            ["Jwt:Audience"] = "TestAudience"
+        };
+
+        foreach (var (key, value) in overrides)
+        {
+            settings[key] = value;
+        }
+
+        return CreateConfiguration(settings);
+    }
+
     private static UsersController CreateController(
         schoolmusicContext context,
         IConfiguration configuration,
@@ -61,6 +83,14 @@ public class LdapAuthTests
             }
         };
         return controller;
+    }
+
+    private static Mock<ILdapService> CreateLdapMock(bool enabled = true)
+    {
+        var mockLdap = new Mock<ILdapService>();
+        mockLdap.SetupGet(l => l.IsEnabled).Returns(enabled);
+        mockLdap.SetupGet(l => l.IsSimulatedMode).Returns(false);
+        return mockLdap;
     }
 
     private static LdapUser CreateLdapUser(string username, string? distinguishedName = null)
@@ -213,7 +243,7 @@ public class LdapAuthTests
         var mockEnv = new Mock<IWebHostEnvironment>();
         mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
         var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
-        
+
         var resultEmail = await service.AuthenticateAsync("jan.kowalski@szkola.edu.pl", "Szkola2026!");
         Assert.True(resultEmail.Success);
         Assert.Equal("jan.kowalski", resultEmail.User!.Username);
@@ -232,15 +262,9 @@ public class LdapAuthTests
     {
         var dbName = Guid.NewGuid().ToString();
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>
-        {
-            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
-            ["Jwt:Issuer"] = "TestIssuer",
-            ["Jwt:Audience"] = "TestAudience"
-        });
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(false);
+        var mockLdap = CreateLdapMock(enabled: false);
 
         var controller = CreateController(context, config, mockLdap.Object);
         var result = await controller.SchoolLogin(new UsersController.SchoolLoginDto
@@ -260,8 +284,8 @@ public class LdapAuthTests
     {
         var dbName = Guid.NewGuid().ToString();
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>());
-        var mockLdap = new Mock<ILdapService>();
+        var config = CreateJwtConfiguration();
+        var mockLdap = CreateLdapMock();
 
         var controller = CreateController(context, config, mockLdap.Object);
         var result = await controller.SchoolLogin(new UsersController.SchoolLoginDto
@@ -278,10 +302,9 @@ public class LdapAuthTests
     {
         var dbName = Guid.NewGuid().ToString();
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>());
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("jan.kowalski", "wrong", default))
             .ReturnsAsync(LdapAuthResult.Fail("Błędny login lub hasło."));
 
@@ -301,15 +324,9 @@ public class LdapAuthTests
     {
         var dbName = Guid.NewGuid().ToString();
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>
-        {
-            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
-            ["Jwt:Issuer"] = "TestIssuer",
-            ["Jwt:Audience"] = "TestAudience"
-        });
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("nowy.uczen", "haslo123!", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("nowy.uczen")));
 
@@ -354,15 +371,9 @@ public class LdapAuthTests
         }
 
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>
-        {
-            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
-            ["Jwt:Issuer"] = "TestIssuer",
-            ["Jwt:Audience"] = "TestAudience"
-        });
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("istniejacy.uczen", "haslo123!", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("istniejacy.uczen")));
 
@@ -403,10 +414,9 @@ public class LdapAuthTests
         }
 
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>());
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("moderator", "HasloZKatalogu123!", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("moderator")));
 
@@ -447,10 +457,9 @@ public class LdapAuthTests
         }
 
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>());
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("jan.kowalski", "Haslo123!", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("jan.kowalski")));
 
@@ -469,10 +478,9 @@ public class LdapAuthTests
     {
         var dbName = Guid.NewGuid().ToString();
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>());
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("anonim", "Haslo123!", default))
             .ReturnsAsync(LdapAuthResult.Ok(new LdapUser("anonim", null, null, Array.Empty<string>(), null)));
 
@@ -517,10 +525,9 @@ public class LdapAuthTests
         }
 
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>());
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("zbanowany.uczen", "valid_ldap_password", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("zbanowany.uczen")));
 
@@ -540,15 +547,9 @@ public class LdapAuthTests
     {
         var dbName = Guid.NewGuid().ToString();
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>
-        {
-            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
-            ["Jwt:Issuer"] = "TestIssuer",
-            ["Jwt:Audience"] = "TestAudience"
-        });
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("jan.kowalski", "Szkola2026!", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("jan.kowalski")));
 
@@ -590,14 +591,9 @@ public class LdapAuthTests
         }
 
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>
-        {
-            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
-            ["Jwt:Issuer"] = "TestIssuer",
-            ["Jwt:Audience"] = "TestAudience"
-        });
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
+        var mockLdap = CreateLdapMock();
 
         var controller = CreateController(context, config, mockLdap.Object);
         var result = await controller.Login(new UsersController.UserLoginDto
@@ -612,7 +608,7 @@ public class LdapAuthTests
         Assert.Equal("lokalny_user", val.username);
 
         // Serwis LDAP nie musiał być nawet wywoływany
-        mockLdap.Verify(l => l.AuthenticateAsync(It.IsAny<string>(), It.IsAny<string>(), default), Times.Never);
+        mockLdap.Verify(l => l.AuthenticateAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -634,10 +630,9 @@ public class LdapAuthTests
         }
 
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>());
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
 
         var controller = CreateController(context, config, mockLdap.Object);
         var result = await controller.Login(new UsersController.UserLoginDto
@@ -672,10 +667,9 @@ public class LdapAuthTests
         }
 
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>());
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         // Ten sam login, ale inne konto w katalogu
         mockLdap.Setup(l => l.AuthenticateAsync("uczen", "Haslo123!", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("uczen", "uid=obcy,ou=Users,dc=szkola,dc=edu,dc=pl")));
@@ -709,15 +703,9 @@ public class LdapAuthTests
         }
 
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>
-        {
-            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
-            ["Jwt:Issuer"] = "TestIssuer",
-            ["Jwt:Audience"] = "TestAudience"
-        });
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("uczen", "Haslo123!", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("uczen")));
 
@@ -878,15 +866,9 @@ public class LdapAuthTests
     {
         var dbName = Guid.NewGuid().ToString();
         using var context = CreateInMemoryContext(dbName);
-        var config = CreateConfiguration(new Dictionary<string, string?>
-        {
-            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
-            ["Jwt:Issuer"] = "TestIssuer",
-            ["Jwt:Audience"] = "TestAudience"
-        });
+        var config = CreateJwtConfiguration();
 
-        var mockLdap = new Mock<ILdapService>();
-        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        var mockLdap = CreateLdapMock();
         mockLdap.Setup(l => l.AuthenticateAsync("concurrent.user", "pass123", default))
             .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("concurrent.user")));
 
