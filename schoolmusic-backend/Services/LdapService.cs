@@ -7,6 +7,9 @@ namespace schoolmusic_backend.Services;
 /// Informacje o użytkowniku pobrane ze szkolnego katalogu LDAP / Active Directory.
 /// </summary>
 /// <param name="Username">Znormalizowany login szkolny (np. imie.nazwisko).</param>
+/// <param name="DisplayName">Nazwa wyświetlana konta, jeśli katalog ją udostępnia.</param>
+/// <param name="Email">Adres e-mail konta, jeśli katalog go udostępnia.</param>
+/// <param name="Groups">Lista grup (memberOf), do której należy konto.</param>
 /// <param name="DistinguishedName">
 /// Stabilny identyfikator konta w katalogu (DN). Służy do powiązania konta lokalnego z kontem szkolnym.
 /// Może być pusty, gdy konto nie zostało znalezione przez wyszukiwanie w katalogu.
@@ -22,6 +25,9 @@ public record LdapUser(
 /// <summary>
 /// Wynik operacji uwierzytelniania w katalogu LDAP.
 /// </summary>
+/// <param name="Success">Czy uwierzytelnianie się powiodło.</param>
+/// <param name="ErrorMessage">Komunikat błędu bezpieczny do zwrócenia klientowi.</param>
+/// <param name="User">Dane konta po udanym uwierzytelnianiu.</param>
 public record LdapAuthResult(
     bool Success,
     string? ErrorMessage,
@@ -328,6 +334,8 @@ public class LdapService : ILdapService
     /// Escapuje znaki specjalne w wartości filtra LDAP zgodnie z RFC 4515 (ochrona przed LDAP injection).
     /// Znaki: \ * ( ) \0 / wymagają escapowania.
     /// </summary>
+    /// <param name="value">Wartość loginu do wstawienia w filtr LDAP.</param>
+    /// <returns>Wartość z zescapowanymi znakami specjalnymi.</returns>
     public static string EscapeLdapFilterValue(string value)
     {
         if (string.IsNullOrEmpty(value))
