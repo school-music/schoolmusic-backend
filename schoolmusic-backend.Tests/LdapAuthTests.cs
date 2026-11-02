@@ -17,6 +17,8 @@ namespace schoolmusic_backend.Tests;
 
 public class LdapAuthTests
 {
+    private const string JanKowalskiDn = "uid=jan.kowalski,ou=Users,dc=szkola,dc=edu,dc=pl";
+
     private static schoolmusicContext CreateInMemoryContext(string dbName)
     {
         var options = new DbContextOptionsBuilder<schoolmusicContext>()
@@ -59,6 +61,16 @@ public class LdapAuthTests
             }
         };
         return controller;
+    }
+
+    private static LdapUser CreateLdapUser(string username, string? distinguishedName = null)
+    {
+        return new LdapUser(
+            username,
+            username,
+            $"{username}@szkola.edu.pl",
+            Array.Empty<string>(),
+            distinguishedName ?? $"uid={username},ou=Users,dc=szkola,dc=edu,dc=pl");
     }
 
     #region LdapService Tests
@@ -123,6 +135,28 @@ public class LdapAuthTests
         Assert.Equal("jan.kowalski", result.User.Username);
         Assert.Equal("Jan Kowalski", result.User.DisplayName);
         Assert.Equal("jan.kowalski@szkola.edu.pl", result.User.Email);
+        Assert.False(string.IsNullOrWhiteSpace(result.User.DistinguishedName));
+    }
+
+    [Fact]
+    public async Task LdapService_SimulatedMode_UsesConfiguredDistinguishedName()
+    {
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Ldap:Enabled"] = "true",
+            ["Ldap:SimulatedMode"] = "true",
+            ["Ldap:SimulatedUsers:0:Login"] = "jan.kowalski",
+            ["Ldap:SimulatedUsers:0:Password"] = "Szkola2026!",
+            ["Ldap:SimulatedUsers:0:DistinguishedName"] = JanKowalskiDn
+        });
+
+        var mockEnv = new Mock<IWebHostEnvironment>();
+        mockEnv.SetupGet(e => e.EnvironmentName).Returns("Development");
+        var service = new LdapService(config, NullLogger<LdapService>.Instance, mockEnv.Object);
+        var result = await service.AuthenticateAsync("jan.kowalski", "Szkola2026!");
+
+        Assert.True(result.Success);
+        Assert.Equal(JanKowalskiDn, result.User!.DistinguishedName);
     }
 
     [Fact]
@@ -277,7 +311,7 @@ public class LdapAuthTests
         var mockLdap = new Mock<ILdapService>();
         mockLdap.Setup(l => l.IsEnabled).Returns(true);
         mockLdap.Setup(l => l.AuthenticateAsync("nowy.uczen", "haslo123!", default))
-            .ReturnsAsync(LdapAuthResult.Ok(new LdapUser("nowy.uczen", "Nowy Uczeń", "nowy.uczen@szkola.edu.pl", Array.Empty<string>())));
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("nowy.uczen")));
 
         var controller = CreateController(context, config, mockLdap.Object);
         var result = await controller.SchoolLogin(new UsersController.SchoolLoginDto
@@ -293,15 +327,16 @@ public class LdapAuthTests
         Assert.Equal("nowy.uczen", val.username);
         Assert.True(val.isLdap);
 
-        // Weryfikacja bazy danych: uczeń został zarejestrowany
+        // Weryfikacja bazy danych: uczeń został zarejestrowany razem z powiązaniem do katalogu
         using var verificationDb = CreateInMemoryContext(dbName);
         var createdUser = await verificationDb.Users.FirstOrDefaultAsync(u => u.UserLogin == "nowy.uczen");
         Assert.NotNull(createdUser);
         Assert.Equal(1, createdUser.RankId);
+        Assert.Equal("uid=nowy.uczen,ou=Users,dc=szkola,dc=edu,dc=pl", createdUser.LdapDn);
     }
 
     [Fact]
-    public async Task SchoolLogin_WhenValid_AndUserAlreadyExistsLocally_LogsInWithoutDuplicatingUser()
+    public async Task SchoolLogin_WhenValid_AndUserAlreadyLinkedToSameDirectoryAccount_LogsInWithoutDuplicatingUser()
     {
         var dbName = Guid.NewGuid().ToString();
         using (var setupDb = CreateInMemoryContext(dbName))
@@ -312,7 +347,8 @@ public class LdapAuthTests
                 UserLogin = "istniejacy.uczen",
                 UserPassword = BCrypt.Net.BCrypt.HashPassword("DummySecret"),
                 RankId = 1,
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.UtcNow,
+                LdapDn = "uid=istniejacy.uczen,ou=Users,dc=szkola,dc=edu,dc=pl"
             });
             await setupDb.SaveChangesAsync();
         }
@@ -328,7 +364,7 @@ public class LdapAuthTests
         var mockLdap = new Mock<ILdapService>();
         mockLdap.Setup(l => l.IsEnabled).Returns(true);
         mockLdap.Setup(l => l.AuthenticateAsync("istniejacy.uczen", "haslo123!", default))
-            .ReturnsAsync(LdapAuthResult.Ok(new LdapUser("istniejacy.uczen", "Istniejący Uczeń", "istniejacy@szkola.edu.pl", Array.Empty<string>())));
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("istniejacy.uczen")));
 
         var controller = CreateController(context, config, mockLdap.Object);
         var result = await controller.SchoolLogin(new UsersController.SchoolLoginDto
@@ -349,6 +385,112 @@ public class LdapAuthTests
     }
 
     [Fact]
+    public async Task SchoolLogin_WhenLocalAccountIsNotLinkedToDirectory_ReturnsConflictInsteadOfTakingOverAccount()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using (var setupDb = CreateInMemoryContext(dbName))
+        {
+            setupDb.Users.Add(new User
+            {
+                Id = 42,
+                UserLogin = "moderator",
+                UserPassword = BCrypt.Net.BCrypt.HashPassword("LokalneHaslo123!"),
+                RankId = 2,
+                CreatedAt = DateTime.UtcNow,
+                LdapDn = null
+            });
+            await setupDb.SaveChangesAsync();
+        }
+
+        using var context = CreateInMemoryContext(dbName);
+        var config = CreateConfiguration(new Dictionary<string, string?>());
+
+        var mockLdap = new Mock<ILdapService>();
+        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        mockLdap.Setup(l => l.AuthenticateAsync("moderator", "HasloZKatalogu123!", default))
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("moderator")));
+
+        var controller = CreateController(context, config, mockLdap.Object);
+        var result = await controller.SchoolLogin(new UsersController.SchoolLoginDto
+        {
+            login = "moderator",
+            password = "HasloZKatalogu123!"
+        });
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        Assert.Equal(StatusCodes.Status409Conflict, conflict.StatusCode);
+
+        // Konto lokalne nie mogło zostać przejęte
+        using var verificationDb = CreateInMemoryContext(dbName);
+        var localUser = await verificationDb.Users.FirstOrDefaultAsync(u => u.UserLogin == "moderator");
+        Assert.NotNull(localUser);
+        Assert.Equal(2, localUser.RankId);
+        Assert.Null(localUser.LdapDn);
+    }
+
+    [Fact]
+    public async Task SchoolLogin_WhenLocalAccountIsLinkedToDifferentDirectoryAccount_ReturnsConflict()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using (var setupDb = CreateInMemoryContext(dbName))
+        {
+            setupDb.Users.Add(new User
+            {
+                Id = 43,
+                UserLogin = "jan.kowalski",
+                UserPassword = BCrypt.Net.BCrypt.HashPassword("DummySecret"),
+                RankId = 1,
+                CreatedAt = DateTime.UtcNow,
+                LdapDn = "uid=stary.wpis,ou=Users,dc=szkola,dc=edu,dc=pl"
+            });
+            await setupDb.SaveChangesAsync();
+        }
+
+        using var context = CreateInMemoryContext(dbName);
+        var config = CreateConfiguration(new Dictionary<string, string?>());
+
+        var mockLdap = new Mock<ILdapService>();
+        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        mockLdap.Setup(l => l.AuthenticateAsync("jan.kowalski", "Haslo123!", default))
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("jan.kowalski")));
+
+        var controller = CreateController(context, config, mockLdap.Object);
+        var result = await controller.SchoolLogin(new UsersController.SchoolLoginDto
+        {
+            login = "jan.kowalski",
+            password = "Haslo123!"
+        });
+
+        Assert.IsType<ConflictObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task SchoolLogin_WhenDirectoryReturnsNoDistinguishedName_ReturnsConflict()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using var context = CreateInMemoryContext(dbName);
+        var config = CreateConfiguration(new Dictionary<string, string?>());
+
+        var mockLdap = new Mock<ILdapService>();
+        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        mockLdap.Setup(l => l.AuthenticateAsync("anonim", "Haslo123!", default))
+            .ReturnsAsync(LdapAuthResult.Ok(new LdapUser("anonim", null, null, Array.Empty<string>(), null)));
+
+        var controller = CreateController(context, config, mockLdap.Object);
+        var result = await controller.SchoolLogin(new UsersController.SchoolLoginDto
+        {
+            login = "anonim",
+            password = "Haslo123!"
+        });
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        Assert.Equal(StatusCodes.Status409Conflict, conflict.StatusCode);
+
+        using var verificationDb = CreateInMemoryContext(dbName);
+        Assert.False(await verificationDb.Users.AnyAsync(u => u.UserLogin == "anonim"));
+    }
+
+    [Fact]
     public async Task SchoolLogin_WhenUserIsBanned_ReturnsForbidden403()
     {
         var dbName = Guid.NewGuid().ToString();
@@ -360,7 +502,8 @@ public class LdapAuthTests
                 UserLogin = "zbanowany.uczen",
                 UserPassword = BCrypt.Net.BCrypt.HashPassword("Secret"),
                 RankId = 1,
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.UtcNow,
+                LdapDn = "uid=zbanowany.uczen,ou=Users,dc=szkola,dc=edu,dc=pl"
             };
             setupDb.Users.Add(user);
             setupDb.BannedUsers.Add(new BannedUser
@@ -379,7 +522,7 @@ public class LdapAuthTests
         var mockLdap = new Mock<ILdapService>();
         mockLdap.Setup(l => l.IsEnabled).Returns(true);
         mockLdap.Setup(l => l.AuthenticateAsync("zbanowany.uczen", "valid_ldap_password", default))
-            .ReturnsAsync(LdapAuthResult.Ok(new LdapUser("zbanowany.uczen", "Zbanowany", "zbanowany@szkola.edu.pl", Array.Empty<string>())));
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("zbanowany.uczen")));
 
         var controller = CreateController(context, config, mockLdap.Object);
         var result = await controller.SchoolLogin(new UsersController.SchoolLoginDto
@@ -407,7 +550,7 @@ public class LdapAuthTests
         var mockLdap = new Mock<ILdapService>();
         mockLdap.Setup(l => l.IsEnabled).Returns(true);
         mockLdap.Setup(l => l.AuthenticateAsync("jan.kowalski", "Szkola2026!", default))
-            .ReturnsAsync(LdapAuthResult.Ok(new LdapUser("jan.kowalski", "Jan Kowalski", "jan.kowalski@szkola.edu.pl", Array.Empty<string>())));
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("jan.kowalski")));
 
         var controller = CreateController(context, config, mockLdap.Object);
         var result = await controller.Login(new UsersController.UserLoginDto
@@ -422,10 +565,11 @@ public class LdapAuthTests
         Assert.Equal("jan.kowalski", val.username);
         Assert.True(val.isLdap);
 
-        // Uczeń został utworzony w bazie
+        // Uczeń został utworzony w bazie razem z powiązaniem do katalogu
         using var verificationDb = CreateInMemoryContext(dbName);
         var userInDb = await verificationDb.Users.FirstOrDefaultAsync(u => u.UserLogin == "jan.kowalski");
         Assert.NotNull(userInDb);
+        Assert.Equal("uid=jan.kowalski,ou=Users,dc=szkola,dc=edu,dc=pl", userInDb.LdapDn);
     }
 
     [Fact]
@@ -469,6 +613,125 @@ public class LdapAuthTests
 
         // Serwis LDAP nie musiał być nawet wywoływany
         mockLdap.Verify(l => l.AuthenticateAsync(It.IsAny<string>(), It.IsAny<string>(), default), Times.Never);
+    }
+
+    [Fact]
+    public async Task StandardLogin_WhenLocalPasswordIsWrong_DoesNotFallBackToDirectoryForUnlinkedAccount()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using (var setupDb = CreateInMemoryContext(dbName))
+        {
+            setupDb.Users.Add(new User
+            {
+                Id = 60,
+                UserLogin = "head_admin",
+                UserPassword = BCrypt.Net.BCrypt.HashPassword("BardzoTajneHaslo123!"),
+                RankId = 4,
+                CreatedAt = DateTime.UtcNow,
+                LdapDn = null
+            });
+            await setupDb.SaveChangesAsync();
+        }
+
+        using var context = CreateInMemoryContext(dbName);
+        var config = CreateConfiguration(new Dictionary<string, string?>());
+
+        var mockLdap = new Mock<ILdapService>();
+        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+
+        var controller = CreateController(context, config, mockLdap.Object);
+        var result = await controller.Login(new UsersController.UserLoginDto
+        {
+            name = "head_admin",
+            password = "HasloZKatalogu123!"
+        });
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Equal(StatusCodes.Status400BadRequest, badRequest.StatusCode);
+
+        // Kluczowe: katalog nie może być nawet odpytany o konto lokalne
+        mockLdap.Verify(l => l.AuthenticateAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task StandardLogin_WhenLinkedAccountPasswordIsWrong_RejectsDirectoryIdentityFromDifferentAccount()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using (var setupDb = CreateInMemoryContext(dbName))
+        {
+            setupDb.Users.Add(new User
+            {
+                Id = 70,
+                UserLogin = "uczen",
+                UserPassword = BCrypt.Net.BCrypt.HashPassword("DummySecret"),
+                RankId = 1,
+                CreatedAt = DateTime.UtcNow,
+                LdapDn = "uid=uczen,ou=Users,dc=szkola,dc=edu,dc=pl"
+            });
+            await setupDb.SaveChangesAsync();
+        }
+
+        using var context = CreateInMemoryContext(dbName);
+        var config = CreateConfiguration(new Dictionary<string, string?>());
+
+        var mockLdap = new Mock<ILdapService>();
+        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        // Ten sam login, ale inne konto w katalogu
+        mockLdap.Setup(l => l.AuthenticateAsync("uczen", "Haslo123!", default))
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("uczen", "uid=obcy,ou=Users,dc=szkola,dc=edu,dc=pl")));
+
+        var controller = CreateController(context, config, mockLdap.Object);
+        var result = await controller.Login(new UsersController.UserLoginDto
+        {
+            name = "uczen",
+            password = "Haslo123!"
+        });
+
+        Assert.IsType<BadRequestObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task StandardLogin_WhenLinkedAccountPasswordIsWrong_AllowsDirectoryLoginForSameIdentity()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using (var setupDb = CreateInMemoryContext(dbName))
+        {
+            setupDb.Users.Add(new User
+            {
+                Id = 71,
+                UserLogin = "uczen",
+                UserPassword = BCrypt.Net.BCrypt.HashPassword("DummySecret"),
+                RankId = 1,
+                CreatedAt = DateTime.UtcNow,
+                LdapDn = "uid=uczen,ou=Users,dc=szkola,dc=edu,dc=pl"
+            });
+            await setupDb.SaveChangesAsync();
+        }
+
+        using var context = CreateInMemoryContext(dbName);
+        var config = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["Jwt:Key"] = "SuperSecretKeyForTestingJwtTokens1234567890!",
+            ["Jwt:Issuer"] = "TestIssuer",
+            ["Jwt:Audience"] = "TestAudience"
+        });
+
+        var mockLdap = new Mock<ILdapService>();
+        mockLdap.Setup(l => l.IsEnabled).Returns(true);
+        mockLdap.Setup(l => l.AuthenticateAsync("uczen", "Haslo123!", default))
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("uczen")));
+
+        var controller = CreateController(context, config, mockLdap.Object);
+        var result = await controller.Login(new UsersController.UserLoginDto
+        {
+            name = "uczen",
+            password = "Haslo123!"
+        });
+
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        var val = Assert.IsType<UsersController.LoginResponseDto>(okResult.Value);
+        Assert.Equal(71, val.userId);
+        Assert.True(val.isLdap);
     }
 
     #endregion
@@ -625,7 +888,7 @@ public class LdapAuthTests
         var mockLdap = new Mock<ILdapService>();
         mockLdap.Setup(l => l.IsEnabled).Returns(true);
         mockLdap.Setup(l => l.AuthenticateAsync("concurrent.user", "pass123", default))
-            .ReturnsAsync(LdapAuthResult.Ok(new LdapUser("concurrent.user", "Concurrent", "c@szkola.pl", new[] { "Uczniowie" })));
+            .ReturnsAsync(LdapAuthResult.Ok(CreateLdapUser("concurrent.user")));
 
         var controller = CreateController(context, config, mockLdap.Object);
 
