@@ -188,7 +188,7 @@ public sealed class VotingTargetService(
 
         if (allowOutside)
         {
-            var preferred = evaluations.FirstOrDefault(e => e.MusicEnabled && e.EndsAt.LocalDateTime > now)
+            var preferred = evaluations.FirstOrDefault(e => e.MusicEnabled && e.EndsAt > serverNowOffset)
                 ?? evaluations.FirstOrDefault(e => e.MusicEnabled)
                 ?? evaluations[0];
 
@@ -209,7 +209,7 @@ public sealed class VotingTargetService(
                 AllowVotingOutsideSchedule: true);
         }
 
-        var openUpcoming = evaluations.FirstOrDefault(e => e.IsOpen && e.CutoffAt.LocalDateTime > now);
+        var openUpcoming = evaluations.FirstOrDefault(e => e.IsOpen && e.CutoffAt > serverNowOffset);
         if (openUpcoming != null)
         {
             return new VotingTargetDto(
@@ -230,7 +230,7 @@ public sealed class VotingTargetService(
         }
 
         var activeClosed = evaluations.FirstOrDefault(e =>
-            now >= e.CutoffAt.LocalDateTime && now < e.EndsAt.LocalDateTime);
+            serverNowOffset >= e.CutoffAt && serverNowOffset < e.EndsAt);
         if (activeClosed != null)
         {
             return new VotingTargetDto(
@@ -252,7 +252,7 @@ public sealed class VotingTargetService(
 
         bool anyMusicEnabledToday = evaluations.Any(e => e.MusicEnabled);
         var lastBreak = evaluations[^1];
-        bool allEnded = now >= lastBreak.EndsAt.LocalDateTime;
+        bool allEnded = serverNowOffset >= lastBreak.EndsAt;
 
         return new VotingTargetDto(
             EligibleBreakId: null,

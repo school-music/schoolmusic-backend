@@ -42,16 +42,22 @@ echo "[verify-compose] Verifying MariaDB schema & seeded views..."
 
 echo "[verify-compose] Waiting for API on http://127.0.0.1:${API_PORT}..."
 ready=0
-for _ in $(seq 1 30); do
+for _ in $(seq 1 45); do
   if curl -fsS "http://127.0.0.1:${API_PORT}/api/system/status" >/dev/null 2>&1; then
     ready=1
     break
   fi
   sleep 1
 done
-test "${ready}" = "1"
 
-for endpoint in "/api/system/status" "/api/queue/voting-target" "/api/tracks" "/api/queue"; do
+if [ "${ready}" != "1" ]; then
+  echo "[verify-compose] API failed to become ready within 45s. Dumping container logs:"
+  "${DOCKER_BIN}" compose -p "${PROJECT_NAME}" --env-file "${ENV_FILE}" -f docker-compose.yml -f "${OVERRIDE_FILE}" ps
+  "${DOCKER_BIN}" compose -p "${PROJECT_NAME}" --env-file "${ENV_FILE}" -f docker-compose.yml -f "${OVERRIDE_FILE}" logs --no-color --tail=200
+  exit 1
+fi
+
+for endpoint in "/api/system/status" "/api/queue/voting-target" "/api/tracks" "/api/queue" "/api/auth/capabilities"; do
   status_code="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${API_PORT}${endpoint}")"
   echo "  GET ${endpoint} -> HTTP ${status_code}"
   test "${status_code}" = "200"

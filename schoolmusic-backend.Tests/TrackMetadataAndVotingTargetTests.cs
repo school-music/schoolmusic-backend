@@ -350,4 +350,47 @@ public sealed class TrackMetadataAndVotingTargetTests
         Assert.Empty(queueForAnon!.UserVotedQueueItemIds);
         Assert.False(Assert.Single(queueForAnon.Queue).HasVoted);
     }
+
+    [Fact]
+    public async Task VotingTargetService_ComparesSchoolInstantsIndependentlyOfOsLocalTimezone()
+    {
+        var dbOptions = new DbContextOptionsBuilder<schoolmusicContext>()
+            .UseInMemoryDatabase($"TzIsolation_{Guid.NewGuid():N}")
+            .Options;
+
+        await using var db = new schoolmusicContext(dbOptions);
+        db.Breaks.Add(new Break
+        {
+            Id = 1,
+            BreakNumber = 1,
+            BreakDate = new DateOnly(2026, 3, 16),
+            StartAt = new DateTime(2026, 3, 16, 10, 0, 0),
+            EndsAt = new DateTime(2026, 3, 16, 10, 15, 0),
+            VoteEnds = new DateTime(2026, 3, 16, 9, 58, 0),
+            MusicEnabled = true
+        });
+        await db.SaveChangesAsync();
+
+        // Strefa znacząco różna od UTC i CET, aby wychwycić ewentualne użycie TimeZoneInfo.Local
+        var aucklandTime = new AdjustableTimeProvider(timeZoneId: "Pacific/Auckland");
+        var service = new VotingTargetService(db, timeProvider: aucklandTime);
+
+        aucklandTime.SetLocalTime(new DateTime(2026, 3, 16, 9, 30, 0));
+        var open = await service.GetVotingTargetAsync();
+        Assert.True(open.IsOpen);
+        Assert.Equal("open", open.Status);
+        Assert.Equal("voting_open", open.ReasonCode);
+        Assert.Equal(1, open.EligibleBreakId);
+        Assert.Equal("Pacific/Auckland", open.TimeZone);
+
+        aucklandTime.SetLocalTime(new DateTime(2026, 3, 16, 10, 5, 0));
+        var closed = await service.GetVotingTargetAsync();
+        Assert.False(closed.IsOpen);
+        Assert.Equal("voting_cutoff_passed", closed.ReasonCode);
+
+        aucklandTime.SetLocalTime(new DateTime(2026, 3, 16, 18, 0, 0));
+        var afterHours = await service.GetVotingTargetAsync();
+        Assert.False(afterHours.IsOpen);
+        Assert.Equal("after_hours", afterHours.ReasonCode);
+    }
 }

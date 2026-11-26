@@ -304,13 +304,17 @@ namespace schoolmusic_backend.Services
                 .Select(item => item.QueueItemId)
                 .ToList();
 
+            var startFallback = DateTime.SpecifyKind(breakEntity.StartAt, DateTimeKind.Unspecified);
+            var endsFallback = DateTime.SpecifyKind(breakEntity.EndsAt, DateTimeKind.Unspecified);
+            var cutoffFallback = DateTime.SpecifyKind(breakEntity.VoteEnds ?? breakEntity.StartAt, DateTimeKind.Unspecified);
+
             var response = new QueueForBreakResponseDto(
                 BreakId: breakEntity.Id,
                 BreakNumber: breakEntity.BreakNumber,
                 BreakDate: evaluation?.TargetDate ?? breakEntity.BreakDate,
-                StartsAt: evaluation?.StartsAt ?? new DateTimeOffset(breakEntity.StartAt, _timeProvider.LocalTimeZone.GetUtcOffset(breakEntity.StartAt)),
-                EndsAt: evaluation?.EndsAt ?? new DateTimeOffset(breakEntity.EndsAt, _timeProvider.LocalTimeZone.GetUtcOffset(breakEntity.EndsAt)),
-                CutoffAt: evaluation?.CutoffAt ?? new DateTimeOffset(breakEntity.VoteEnds ?? breakEntity.StartAt, _timeProvider.LocalTimeZone.GetUtcOffset(breakEntity.VoteEnds ?? breakEntity.StartAt)),
+                StartsAt: evaluation?.StartsAt ?? new DateTimeOffset(startFallback, _timeProvider.LocalTimeZone.GetUtcOffset(startFallback)),
+                EndsAt: evaluation?.EndsAt ?? new DateTimeOffset(endsFallback, _timeProvider.LocalTimeZone.GetUtcOffset(endsFallback)),
+                CutoffAt: evaluation?.CutoffAt ?? new DateTimeOffset(cutoffFallback, _timeProvider.LocalTimeZone.GetUtcOffset(cutoffFallback)),
                 TimeZone: _timeProvider.LocalTimeZone.Id,
                 IsVotingOpen: evaluation?.IsOpen ?? true,
                 VotingStatus: evaluation?.Status ?? "open",
