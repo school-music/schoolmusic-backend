@@ -33,7 +33,12 @@ services:
 EOF
 
 echo "[verify-compose] Starting clean-volume MariaDB + Redis + API stack (${PROJECT_NAME})..."
-"${DOCKER_BIN}" compose -p "${PROJECT_NAME}" --env-file "${ENV_FILE}" -f docker-compose.yml -f "${OVERRIDE_FILE}" up -d --build --wait
+if ! "${DOCKER_BIN}" compose -p "${PROJECT_NAME}" --env-file "${ENV_FILE}" -f docker-compose.yml -f "${OVERRIDE_FILE}" up -d --build --wait; then
+  echo "[verify-compose] Stack failed to start cleanly. Dumping container status and logs:"
+  "${DOCKER_BIN}" compose -p "${PROJECT_NAME}" --env-file "${ENV_FILE}" -f docker-compose.yml -f "${OVERRIDE_FILE}" ps -a || true
+  "${DOCKER_BIN}" compose -p "${PROJECT_NAME}" --env-file "${ENV_FILE}" -f docker-compose.yml -f "${OVERRIDE_FILE}" logs --no-color --tail=200 || true
+  exit 1
+fi
 
 echo "[verify-compose] Verifying MariaDB schema & seeded views..."
 "${DOCKER_BIN}" compose -p "${PROJECT_NAME}" --env-file "${ENV_FILE}" -f docker-compose.yml -f "${OVERRIDE_FILE}" exec -T db \

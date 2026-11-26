@@ -510,8 +510,7 @@ CREATE TABLE `refresh_tokens` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uniq_refresh_token_hash` (`token_hash`),
   KEY `idx_refresh_tokens_user` (`user_id`),
-  KEY `idx_refresh_tokens_family` (`family_id`),
-  CONSTRAINT `fk_refresh_tokens_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+  KEY `idx_refresh_tokens_family` (`family_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_polish_ci;
 
 -- --------------------------------------------------------
@@ -529,8 +528,7 @@ CREATE TABLE `password_reset_tokens` (
   `created_at` datetime NOT NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uniq_password_reset_token_hash` (`token_hash`),
-  KEY `idx_password_reset_user` (`user_id`),
-  CONSTRAINT `fk_password_reset_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+  KEY `idx_password_reset_user` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_polish_ci;
 
 -- --------------------------------------------------------
@@ -549,8 +547,7 @@ CREATE TABLE `email_verification_tokens` (
   `created_at` datetime NOT NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uniq_email_verification_token_hash` (`token_hash`),
-  KEY `idx_email_verification_user` (`user_id`),
-  CONSTRAINT `fk_email_verification_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+  KEY `idx_email_verification_user` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_polish_ci;
 
 -- --------------------------------------------------------
@@ -993,6 +990,24 @@ ALTER TABLE `song_greenlist`
 --
 ALTER TABLE `users`
   ADD CONSTRAINT `fk_users_rank` FOREIGN KEY (`rank_id`) REFERENCES `ranks` (`id`);
+
+--
+-- Constraints for table `refresh_tokens`
+--
+ALTER TABLE `refresh_tokens`
+  ADD CONSTRAINT `fk_refresh_tokens_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `password_reset_tokens`
+--
+ALTER TABLE `password_reset_tokens`
+  ADD CONSTRAINT `fk_password_reset_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `email_verification_tokens`
+--
+ALTER TABLE `email_verification_tokens`
+  ADD CONSTRAINT `fk_email_verification_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `user_favourites`
