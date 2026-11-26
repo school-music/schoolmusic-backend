@@ -27,6 +27,7 @@ public static class ProductionConfigurationValidator
         var errors = new List<string>();
         ValidateDatabase(configuration, errors);
         ValidateRedis(configuration, errors);
+        ValidateSmtp(configuration, errors);
 
         if (errors.Count > 0)
         {
@@ -89,6 +90,17 @@ public static class ProductionConfigurationValidator
         {
             errors.Add("Połączenie do Redis ma nieprawidłowy format.");
         }
+    }
+
+    private static void ValidateSmtp(IConfiguration configuration, List<string> errors)
+    {
+        if (!configuration.GetValue<bool>("Smtp:Enabled"))
+            return;
+
+        if (string.IsNullOrWhiteSpace(configuration["Smtp:Host"]))
+            errors.Add("Smtp:Host jest wymagany, gdy Smtp:Enabled=true.");
+        if (string.IsNullOrWhiteSpace(configuration["Smtp:FromAddress"]))
+            errors.Add("Smtp:FromAddress jest wymagany, gdy Smtp:Enabled=true.");
     }
 
     private static string? GetValue(DbConnectionStringBuilder builder, params string[] keys)

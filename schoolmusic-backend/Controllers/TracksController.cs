@@ -1,10 +1,8 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using LibVLCSharp.Shared;
-using schoolmusic_backend.Models;
 using schoolmusic_backend.Extensions;
-using static System.Net.WebRequestMethods;
+using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers;
@@ -49,13 +47,48 @@ public record GenresListResponseDto(
     IReadOnlyList<string> Genres
 );
 
+public sealed record ExternalTrackSearchItemDto(
+    string Title,
+    string Artist,
+    string ArtistName,
+    string? Cover,
+    int DurationMs,
+    string ExternalId,
+    string? SpotifyId,
+    string Source
+);
+
+public sealed record FavouriteTrackItemDto(
+    int Id,
+    int SongId,
+    string? SpotifyId,
+    string Title,
+    int ArtistId,
+    string ArtistName,
+    string? Cover,
+    int DurationMs,
+    string? Genre,
+    string Source,
+    string? SongUrl
+);
+
+public sealed record FavouriteTracksResponseDto(
+    string Message,
+    IReadOnlyList<FavouriteTrackItemDto> Tracks
+);
+
+public sealed record FavouriteMutationResponseDto(
+    string Message,
+    int SongId
+);
+
 /// <summary>
-/// Kontroler API obsługujący operacje związane z utworami: pobieranie i zarządzanie ulubionymi, odtwarzanie plików/URL
-/// oraz obliczanie planu przerwy dla kolejki utworów
+/// Kontroler API obsługujący operacje związane z utworami: przeglądanie katalogu, wyszukiwanie zewnętrzne i zarządzanie ulubionymi.
 /// </summary>
 [Route("api/[controller]")]
 [ApiController]
 [Authorize]
+[Produces("application/json")]
 public class TracksController : ControllerBase
 {
     private readonly schoolmusicContext _context;
@@ -63,19 +96,22 @@ public class TracksController : ControllerBase
     private readonly IAudioPlayerService _audioPlayerService;
     private readonly ISongSourceService _songSourceService;
     private readonly TimeProvider _timeProvider;
+    private readonly IVotingTargetService _votingTargetService;
 
     public TracksController(
         schoolmusicContext context,
         IBreakService breakService,
         IAudioPlayerService audioPlayerService,
         ISongSourceService songSourceService,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IVotingTargetService? votingTargetService = null)
     {
         _context = context;
         _breakService = breakService;
         _audioPlayerService = audioPlayerService;
         _songSourceService = songSourceService;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _votingTargetService = votingTargetService ?? new VotingTargetService(context, timeProvider: _timeProvider);
     }
 
     /// <summary>
@@ -84,6 +120,9 @@ public class TracksController : ControllerBase
     /// </summary>
     [HttpGet("search")]
     [AllowAnonymous]
+    [ProducesResponseType<IReadOnlyList<ExternalTrackSearchItemDto>>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> SearchTracks(
         [FromQuery(Name = "q")] string? q = null,
         [FromHeader(Name = "q")] string? headerQ = null,
@@ -94,26 +133,31 @@ public class TracksController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(searchQuery))
         {
-            return BadRequest(new { Message = "Parametr q jest wymagany." });
+            return this.Create(StatusCodes.Status400BadRequest, "Parametr q jest wymagany.");
         }
 
         if (!_songSourceService.IsConfigured)
         {
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
-            {
-                Message = "Wyszukiwanie Spotify jest niedostępne. Skonfiguruj Spotify:ClientId i Spotify:ClientSecret."
-            });
+            return this.Create(
+                StatusCodes.Status503ServiceUnavailable,
+                "Wyszukiwanie Spotify jest niedostępne. Skonfiguruj Spotify:ClientId i Spotify:ClientSecret.");
         }
 
         var tracks = await _songSourceService.SearchTracksAsync(searchQuery.Trim());
-        return Ok(tracks.Select(track => new
-        {
-            title = track.Title,
-            artist = track.ArtistName,
-            cover = track.CoverUrl,
-            durationMs = track.DurationMs,
-            externalId = track.ExternalId
-        }));
+        var items = tracks.Select(track => new ExternalTrackSearchItemDto(
+            Title: track.Title,
+            Artist: track.ArtistName,
+            ArtistName: track.ArtistName,
+            Cover: track.CoverUrl,
+            DurationMs: track.DurationMs,
+            ExternalId: track.ExternalId,
+            SpotifyId: string.Equals(track.Source, "spotify", StringComparison.OrdinalIgnoreCase)
+                ? track.ExternalId
+                : null,
+            Source: track.Source
+        )).ToList();
+
+        return Ok(items);
     }
 
     /// <summary>
@@ -122,6 +166,7 @@ public class TracksController : ControllerBase
     /// </summary>
     [HttpGet]
     [AllowAnonymous]
+    [ProducesResponseType<TracksPagedResponseDto>(StatusCodes.Status200OK)]
     public async Task<IActionResult> GetTracks(
         [FromQuery] string? search = null,
         [FromQuery] string? genre = null,
@@ -188,7 +233,6 @@ public class TracksController : ControllerBase
 
         var songIds = pageSongs.Select(s => s.Id).ToList();
 
-        // Pobranie danych kolejki i głosów dla wyświetlanej strony
         var queueLookup = new Dictionary<int, (int votesCount, int queueItemId, string status)>();
         if (targetBreakId.HasValue && songIds.Count > 0)
         {
@@ -209,7 +253,6 @@ public class TracksController : ControllerBase
             }
         }
 
-        // Sprawdzenie ulubionych dla zalogowanego użytkownika
         var currentUserId = HttpContext.GetCurrentUserId();
         var favoriteSongIds = new HashSet<int>();
         if (currentUserId.HasValue && songIds.Count > 0)
@@ -259,6 +302,7 @@ public class TracksController : ControllerBase
     /// </summary>
     [HttpGet("genres")]
     [AllowAnonymous]
+    [ProducesResponseType<GenresListResponseDto>(StatusCodes.Status200OK)]
     public async Task<IActionResult> GetGenres()
     {
         var genres = await _context.Songs
@@ -279,6 +323,8 @@ public class TracksController : ControllerBase
     /// </summary>
     [HttpGet("{id:int}")]
     [AllowAnonymous]
+    [ProducesResponseType<TrackListItemDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetTrackById(int id, [FromQuery] int? breakId = null)
     {
         var song = await _context.Songs
@@ -287,7 +333,7 @@ public class TracksController : ControllerBase
 
         if (song == null)
         {
-            return NotFound(new { Message = "Nie znaleziono utworu o podanym ID." });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono utworu o podanym ID.");
         }
 
         int? targetBreakId = await GetEffectiveTargetBreakIdAsync(breakId);
@@ -352,197 +398,166 @@ public class TracksController : ControllerBase
             return exists ? requestedBreakId.Value : null;
         }
 
-        var now = _timeProvider.GetLocalNow().DateTime;
-        var today = DateOnly.FromDateTime(now);
-        var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
-        if (allBreaks.Count == 0) return null;
-
-        var activeBreak = allBreaks.FirstOrDefault(b =>
+        var target = await _votingTargetService.GetVotingTargetAsync();
+        if (target.EligibleBreakId.HasValue)
         {
-            var start = today.ToDateTime(TimeOnly.FromDateTime(b.StartAt));
-            var end = today.ToDateTime(TimeOnly.FromDateTime(b.EndsAt));
-            return now >= start && now < end;
-        });
-
-        if (activeBreak != null)
-        {
-            return activeBreak.Id;
+            return target.EligibleBreakId.Value;
         }
 
-        var upcoming = allBreaks.FirstOrDefault(b =>
+        if (target.BreakId.HasValue)
         {
-            var voteEnd = b.VoteEnds.HasValue
-                ? today.ToDateTime(TimeOnly.FromDateTime(b.VoteEnds.Value))
-                : today.ToDateTime(TimeOnly.FromDateTime(b.StartAt));
-            return voteEnd > now;
-        });
+            return target.BreakId.Value;
+        }
 
-        return upcoming?.Id ?? allBreaks.FirstOrDefault()?.Id;
+        return await _context.Breaks.OrderBy(b => b.BreakNumber).Select(b => (int?)b.Id).FirstOrDefaultAsync();
     }
 
     /// <summary>
-    /// Zwraca listę ulubionych utworów zalogowanego użytkownika
+    /// Zwraca listę ulubionych utworów zalogowanego użytkownika wraz z wykonawcą i metadanymi źródła.
     /// </summary>
-    /// <returns>Task&lt;IActionResult&gt; — 200 OK zawierające obiekt z polem Message i kolekcją Tracks (Id, SpotifyId, Title, Cover,
-    /// DurationMs); 401 Unauthorized gdy token JWT jest nieprawidłowy</returns>
     [HttpGet("favourites")]
+    [ProducesResponseType<FavouriteTracksResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> GetAllFavourites()
     {
         var currentUserId = HttpContext.GetCurrentUserId();
         if (currentUserId == null)
         {
-            return Unauthorized(new
-            {
-                Message = "Token JWT niepoprawny"
-            });
+            return this.Create(StatusCodes.Status401Unauthorized, "Token JWT niepoprawny");
         }
 
-        //var songs = user.Songs; błąd serializacji przez tabele w MysQL
-        var songs = await _context.Users.Where(u => u.Id == currentUserId)
+        var songs = await _context.Users
+            .AsNoTracking()
+            .Where(u => u.Id == currentUserId.Value)
             .SelectMany(u => u.Songs)
-            .Select(s => new
-            {
+            .Include(s => s.Artist)
+            .Select(s => new FavouriteTrackItemDto(
+                s.Id,
                 s.Id,
                 s.SpotifyId,
                 s.Title,
+                s.ArtistId,
+                s.Artist != null ? s.Artist.Name : "Nieznany wykonawca",
                 s.Cover,
                 s.DurationMs,
-            }).ToListAsync();
-        return Ok(new
-        {
-            Message = "Ulubione utwory użytkownika",
-            Tracks = songs
-        });
+                s.Genre,
+                s.Source,
+                s.SongUrl
+            ))
+            .ToListAsync();
 
+        return Ok(new FavouriteTracksResponseDto(
+            Message: "Ulubione utwory użytkownika",
+            Tracks: songs
+        ));
     }
 
-
     /// <summary>
-    /// Dodawanie po id w bazie danych
+    /// Dodaje utwór po id w bazie danych do ulubionych zalogowanego użytkownika
     /// </summary>
     [HttpPost("{id:int}/favourites")]
+    [ProducesResponseType<FavouriteMutationResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> AddToFavourites(int id)
     {
         var currentUserId = HttpContext.GetCurrentUserId();
         if (currentUserId == null)
         {
-            return Unauthorized(new
-            {
-                Message = "Token JWT niepoprawny"
-            });
+            return this.Create(StatusCodes.Status401Unauthorized, "Token JWT niepoprawny");
         }
 
         var user = await _context.Users.Include(u => u.Songs)
             .FirstOrDefaultAsync(u => u.Id == currentUserId);
         if (user == null)
         {
-            return NotFound(new { Message = "Użytkownik nie znaleziony" });
+            return this.Create(StatusCodes.Status404NotFound, "Użytkownik nie znaleziony");
         }
 
         var song = await _context.Songs.FindAsync(id);
         if (song == null)
         {
-            return NotFound(new { Message = "Nie znaleziono piosenki." });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono piosenki.");
         }
-
 
         if (!user.Songs.Contains(song))
         {
             user.Songs.Add(song);
             await _context.SaveChangesAsync();
-            return Ok(new
-            {
-                Message = "Poprawnie dodano do ulubionych"
-            });
-        }
-        else
-        {
-            return Conflict(new
-            {
-                Message = "Piosenka jest już w ulubionych"
-            });
+            return Ok(new FavouriteMutationResponseDto("Poprawnie dodano do ulubionych", song.Id));
         }
 
+        return this.Create(StatusCodes.Status409Conflict, "Piosenka jest już w ulubionych");
     }
 
     /// <summary>
     /// Dodaje utwór o podanym identyfikatorze Spotify do listy ulubionych bieżącego użytkownika
     /// </summary>
-    /// <returns>200 OK po pomyślnym dodaniu; 401 Unauthorized przy brakującym lub niepoprawnym tokenie; 404 NotFound gdy nie
-    /// znaleziono użytkownika lub utworu; 409 Conflict gdy utwór już znajduje się w ulubionych</returns>
     [HttpPost("spotify/{spotifyId}/favourites")]
+    [ProducesResponseType<FavouriteMutationResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> AddToFavouritesSpotifyId(string spotifyId)
     {
         var currentUserId = HttpContext.GetCurrentUserId();
         if (currentUserId == null)
         {
-            return Unauthorized(new
-            {
-                Message = "Token JWT niepoprawny"
-            });
+            return this.Create(StatusCodes.Status401Unauthorized, "Token JWT niepoprawny");
         }
+
         var user = await _context.Users.Include(u => u.Songs)
             .FirstOrDefaultAsync(u => u.Id == currentUserId);
 
         if (user == null)
         {
-            return NotFound(new
-            {
-                Message = "Nie znaleziono użytkownika o podanym ID"
-            });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono użytkownika o podanym ID");
         }
 
+        var normalizedId = SpotifyTrackImporter.NormalizeSpotifyTrackId(spotifyId);
         var song = await _context.Songs
-            .FirstOrDefaultAsync(candidate => candidate.SpotifyId == spotifyId);
+            .FirstOrDefaultAsync(candidate => candidate.SpotifyId == normalizedId || candidate.SpotifyId == spotifyId);
         if (song == null)
         {
             if (!_songSourceService.IsConfigured)
             {
-                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
-                {
-                    Message = "Dodawanie utworów Spotify jest niedostępne. Skonfiguruj Spotify:ClientId i Spotify:ClientSecret."
-                });
+                return this.Create(
+                    StatusCodes.Status503ServiceUnavailable,
+                    "Dodawanie utworów Spotify jest niedostępne. Skonfiguruj Spotify:ClientId i Spotify:ClientSecret.");
             }
 
             song = await SpotifyTrackImporter.GetOrImportAsync(_context, _songSourceService, spotifyId);
             if (song == null)
             {
-                return NotFound(new { Message = "Nie znaleziono utworu o podanym Spotify ID." });
+                return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono utworu o podanym Spotify ID.");
             }
         }
+
         if (!user.Songs.Contains(song))
         {
             user.Songs.Add(song);
             await _context.SaveChangesAsync();
-            return Ok(new
-            {
-                Message = "Poprawnie dodano do ulubionych"
-            });
+            return Ok(new FavouriteMutationResponseDto("Poprawnie dodano do ulubionych", song.Id));
         }
-        else
-        {
-            return Conflict(new
-            {
-                Message = "Piosenka już jest w ulubionych"
-            });
-        }
+
+        return this.Create(StatusCodes.Status409Conflict, "Piosenka jest już w ulubionych");
     }
 
     /// <summary>
     /// Usuwa piosenkę z listy ulubionych zalogowanego użytkownika
     /// </summary>
-    /// <returns>Zwraca IActionResult: 200 (OK) po pomyślnym usunięciu; 401 (Unauthorized) jeśli brak lub niepoprawny token; 404
-    /// (NotFound) jeśli użytkownik, piosenka lub powiązanie piosenki z ulubionymi nie istnieje</returns>
     [HttpDelete("favourites/{id}")]
+    [ProducesResponseType<FavouriteMutationResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> DeleteFromFavourites(int id)
     {
         var currentUserId = HttpContext.GetCurrentUserId();
         if (currentUserId == null)
         {
-            return Unauthorized(new
-            {
-                Message = "Token JWT niepoprawny"
-            });
+            return this.Create(StatusCodes.Status401Unauthorized, "Token JWT niepoprawny");
         }
 
         var user = await _context.Users.Include(u => u.Songs)
@@ -550,31 +565,18 @@ public class TracksController : ControllerBase
         var song = await _context.Songs.FirstOrDefaultAsync(s => s.Id == id);
         if (user == null)
         {
-            return NotFound(new
-            {
-                Message = "Nie znaleziono użytkownika"
-            });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono użytkownika");
         }
         if (song == null)
         {
-            return NotFound(new
-            {
-                Message = "Nie znaleziono piosenki"
-            });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono piosenki");
         }
 
         if (!user.Songs.Remove(song))
         {
-            return NotFound(new
-            {
-                Message = "Piosenka nie znajdowała sie w ulubionych"
-            });
+            return this.Create(StatusCodes.Status404NotFound, "Piosenka nie znajdowała sie w ulubionych");
         }
         await _context.SaveChangesAsync();
-        return Ok(new
-        {
-            Message = "Pomyślnie usunięto piosenke z ulubionych"
-        });
-
+        return Ok(new FavouriteMutationResponseDto("Pomyślnie usunięto piosenke z ulubionych", song.Id));
     }
 }

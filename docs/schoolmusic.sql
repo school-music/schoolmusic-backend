@@ -403,7 +403,7 @@ INSERT INTO `songs` (`id`, `spotify_id`, `source`, `title`, `artist_id`, `cover`
 (97, NULL, 'other', 'Requiem in D Minor - Lacrimosa', 2, 'https://images.unsplash.com/photo-1511192336575-5a79af67a629?w=400', 'https://archive.org/download/mozart-requiem-lacrimosa/Lacrimosa.mp3', 'Classical', 195000, 1, '2026-10-14 12:00:00'),
 (98, NULL, 'other', 'The Marriage of Figaro - Overture', 2, 'https://images.unsplash.com/photo-1511192336575-5a79af67a629?w=400', 'https://archive.org/download/mozart-figaro-overture/FigaroOverture.mp3', 'Classical', 250000, 1, '2026-10-14 12:00:00'),
 (99, NULL, 'other', 'Jesu, Joy of Mans Desiring', 3, 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400', 'https://archive.org/download/bach-jesu-joy/JesuJoy.mp3', 'Classical', 205000, 1, '2026-10-14 12:00:00'),
-(100, NULL, 'other', 'Goldberg Variations - Aria', 3, 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400', 'https://archive.org/download/bach-goldberg-variations/Aria.mp3', 'Classical', 235000, 1, '2026-10-14 12:00:00';
+(100, NULL, 'other', 'Goldberg Variations - Aria', 3, 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400', 'https://archive.org/download/bach-goldberg-variations/Aria.mp3', 'Classical', 235000, 1, '2026-10-14 12:00:00');
 
 -- --------------------------------------------------------
 
@@ -434,18 +434,6 @@ CREATE TABLE `song_greenlist` (
 -- --------------------------------------------------------
 
 --
--- Zastąpiona struktura widoku `song_vote_counts`
--- (See below for the actual view)
---
-CREATE TABLE `song_vote_counts` (
-`song_id` int(11)
-,`title` varchar(500)
-,`total_votes` bigint(21)
-);
-
--- --------------------------------------------------------
-
---
 -- Struktura tabeli dla tabeli `special_event`
 --
 
@@ -460,6 +448,23 @@ CREATE TABLE `special_event` (
 -- --------------------------------------------------------
 
 --
+-- Struktura tabeli dla tabeli `spotify_playback_connection`
+--
+
+CREATE TABLE `spotify_playback_connection` (
+  `id` int(11) NOT NULL,
+  `spotify_user_id` varchar(128) NOT NULL,
+  `refresh_token_ciphertext` text NOT NULL,
+  `refresh_token_expires_at` datetime NOT NULL,
+  `created_at` datetime NOT NULL,
+  `updated_at` datetime NOT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `chk_spotify_playback_singleton` CHECK (`id` = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_polish_ci;
+
+-- --------------------------------------------------------
+
+--
 -- Struktura tabeli dla tabeli `users`
 --
 
@@ -467,6 +472,12 @@ CREATE TABLE `users` (
   `id` int(11) NOT NULL,
   `user_login` varchar(255) NOT NULL,
   `user_password` varchar(255) NOT NULL,
+  `display_name` varchar(80) DEFAULT NULL,
+  `email` varchar(254) DEFAULT NULL,
+  `email_verified_at` datetime DEFAULT NULL,
+  `verified_email` varchar(254) GENERATED ALWAYS AS (CASE WHEN `email_verified_at` IS NOT NULL THEN LOWER(`email`) ELSE NULL END) PERSISTENT,
+  `auth_provider` enum('local','ldap') NOT NULL DEFAULT 'local',
+  `token_version` int(11) NOT NULL DEFAULT 1,
   `rank_id` int(11) NOT NULL DEFAULT 1,
   `created_at` datetime NOT NULL DEFAULT current_timestamp(),
   `password_changed_at` datetime DEFAULT current_timestamp()
@@ -480,6 +491,67 @@ INSERT INTO `users` (`id`, `user_login`, `user_password`, `rank_id`, `created_at
 (1, 'admin', '$2a$11$RfCjUetz/HFf3dTZfc45ouyOAhxB36VPBczvr34R9J1eM3wtEQnDG', 4, '2026-09-29 18:22:10', '2026-09-29 18:22:10'),
 (2, 'moderator', '$2a$11$kNcBLK8P86/pbT.hsniFnOT3vk.Ps2RGMH7qoqfzPo/psGUkMIaeq', 2, '2026-10-02 20:28:30', '2026-10-02 20:28:30'),
 (3, 'uczen', '$2a$11$8WtVBUU47ym4pfvO3SpLd.MAqDpjZ1EMDEWC.RsDt/Ay5AscDVdji', 1, '2026-10-09 20:39:45', '2026-10-09 20:39:45');
+
+-- --------------------------------------------------------
+
+--
+-- Struktura tabeli dla tabeli `refresh_tokens`
+--
+
+CREATE TABLE `refresh_tokens` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `user_id` int(11) NOT NULL,
+  `token_hash` char(64) NOT NULL,
+  `family_id` char(36) NOT NULL,
+  `expires_at` datetime NOT NULL,
+  `revoked_at` datetime DEFAULT NULL,
+  `replaced_by_id` int(11) DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_refresh_token_hash` (`token_hash`),
+  KEY `idx_refresh_tokens_user` (`user_id`),
+  KEY `idx_refresh_tokens_family` (`family_id`),
+  CONSTRAINT `fk_refresh_tokens_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_polish_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Struktura tabeli dla tabeli `password_reset_tokens`
+--
+
+CREATE TABLE `password_reset_tokens` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `user_id` int(11) NOT NULL,
+  `token_hash` char(64) NOT NULL,
+  `expires_at` datetime NOT NULL,
+  `used_at` datetime DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_password_reset_token_hash` (`token_hash`),
+  KEY `idx_password_reset_user` (`user_id`),
+  CONSTRAINT `fk_password_reset_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_polish_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Struktura tabeli dla tabeli `email_verification_tokens`
+--
+
+CREATE TABLE `email_verification_tokens` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `user_id` int(11) NOT NULL,
+  `email` varchar(254) NOT NULL,
+  `token_hash` char(64) NOT NULL,
+  `expires_at` datetime NOT NULL,
+  `used_at` datetime DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_email_verification_token_hash` (`token_hash`),
+  KEY `idx_email_verification_user` (`user_id`),
+  CONSTRAINT `fk_email_verification_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_polish_ci;
 
 -- --------------------------------------------------------
 
@@ -546,6 +618,7 @@ INSERT INTO `weekly_schedule` (`weekday`, `music_enabled`) VALUES
 --
 -- Struktura widoku `song_vote_counts`
 --
+DROP TABLE IF EXISTS `song_vote_counts`;
 DROP VIEW IF EXISTS `song_vote_counts`;
 
 CREATE ALGORITHM=UNDEFINED SQL SECURITY INVOKER VIEW `song_vote_counts`  AS SELECT `s`.`id` AS `song_id`, `s`.`title` AS `title`, count(`v`.`id`) AS `total_votes` FROM ((`songs` `s` left join `queue_items` `qi` on(`qi`.`song_id` = `s`.`id`)) left join `votes` `v` on(`v`.`queue_item_id` = `qi`.`id`)) WHERE `s`.`is_active` = 1 GROUP BY `s`.`id`, `s`.`title` ;
@@ -696,6 +769,7 @@ ALTER TABLE `special_event`
 ALTER TABLE `users`
   ADD PRIMARY KEY (`id`),
   ADD UNIQUE KEY `uniq_user_login` (`user_login`),
+  ADD UNIQUE KEY `uniq_users_verified_email` (`verified_email`),
   ADD KEY `idx_users_rank` (`rank_id`);
 
 --
@@ -854,7 +928,7 @@ ALTER TABLE `artist_blacklist`
 --
 ALTER TABLE `banned_users`
   ADD CONSTRAINT `fk_banned_mod` FOREIGN KEY (`moderator_id`) REFERENCES `moderators` (`id`),
-  ADD CONSTRAINT `fk_banned_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`);
+  ADD CONSTRAINT `fk_banned_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `default_songs`
@@ -890,7 +964,7 @@ ALTER TABLE `queue_items`
   ADD CONSTRAINT `fk_queue_green` FOREIGN KEY (`greenlist_id`) REFERENCES `song_greenlist` (`id`),
   ADD CONSTRAINT `fk_queue_mod` FOREIGN KEY (`moderator_id`) REFERENCES `moderators` (`id`),
   ADD CONSTRAINT `fk_queue_song` FOREIGN KEY (`song_id`) REFERENCES `songs` (`id`),
-  ADD CONSTRAINT `fk_queue_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`);
+  ADD CONSTRAINT `fk_queue_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL;
 
 --
 -- Constraints for table `songs`
@@ -925,14 +999,14 @@ ALTER TABLE `users`
 --
 ALTER TABLE `user_favourites`
   ADD CONSTRAINT `fk_fav_song` FOREIGN KEY (`song_id`) REFERENCES `songs` (`id`),
-  ADD CONSTRAINT `fk_fav_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`);
+  ADD CONSTRAINT `fk_fav_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `votes`
 --
 ALTER TABLE `votes`
   ADD CONSTRAINT `fk_votes_queue` FOREIGN KEY (`queue_item_id`) REFERENCES `queue_items` (`id`),
-  ADD CONSTRAINT `fk_votes_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`);
+  ADD CONSTRAINT `fk_votes_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `weekly_break_settings`

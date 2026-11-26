@@ -32,11 +32,17 @@ public partial class schoolmusicContext : DbContext
 
     public virtual DbSet<ExceptionDay> ExceptionDays { get; set; }
 
+    public virtual DbSet<EmailVerificationToken> EmailVerificationTokens { get; set; }
+
     public virtual DbSet<History> Histories { get; set; }
 
     public virtual DbSet<Moderator> Moderators { get; set; }
 
+    public virtual DbSet<PasswordResetToken> PasswordResetTokens { get; set; }
+
     public virtual DbSet<PlaybackState> PlaybackStates { get; set; }
+
+    public virtual DbSet<RefreshToken> RefreshTokens { get; set; }
 
     public virtual DbSet<SpotifyPlaybackConnection> SpotifyPlaybackConnections { get; set; }
 
@@ -101,7 +107,7 @@ public partial class schoolmusicContext : DbContext
                 .HasConstraintName("fk_banned_mod");
 
             entity.HasOne(d => d.User).WithMany(p => p.BannedUsers)
-                .OnDelete(DeleteBehavior.ClientSetNull)
+                .OnDelete(DeleteBehavior.Cascade)
                 .HasConstraintName("fk_banned_user");
         });
 
@@ -203,7 +209,9 @@ public partial class schoolmusicContext : DbContext
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("fk_queue_song");
 
-            entity.HasOne(d => d.User).WithMany(p => p.QueueItems).HasConstraintName("fk_queue_user");
+            entity.HasOne(d => d.User).WithMany(p => p.QueueItems)
+                .OnDelete(DeleteBehavior.SetNull)
+                .HasConstraintName("fk_queue_user");
         });
 
         modelBuilder.Entity<Rank>(entity =>
@@ -275,9 +283,11 @@ public partial class schoolmusicContext : DbContext
         {
             entity.HasKey(e => e.Id).HasName("PRIMARY");
 
+            entity.Property(e => e.AuthProvider).HasDefaultValueSql("'local'");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("current_timestamp()");
             entity.Property(e => e.PasswordChangedAt).HasDefaultValueSql("current_timestamp()");
             entity.Property(e => e.RankId).HasDefaultValueSql("'1'");
+            entity.Property(e => e.TokenVersion).HasDefaultValue(1);
 
             entity.HasOne(d => d.Rank).WithMany(p => p.Users)
                 .OnDelete(DeleteBehavior.ClientSetNull)
@@ -292,7 +302,7 @@ public partial class schoolmusicContext : DbContext
                         .HasConstraintName("fk_fav_song"),
                     l => l.HasOne<User>().WithMany()
                         .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.ClientSetNull)
+                        .OnDelete(DeleteBehavior.Cascade)
                         .HasConstraintName("fk_fav_user"),
                     j =>
                     {
@@ -310,6 +320,33 @@ public partial class schoolmusicContext : DbContext
                     });
         });
 
+        modelBuilder.Entity<RefreshToken>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("PRIMARY");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("current_timestamp()");
+            entity.HasOne(d => d.User).WithMany(p => p.RefreshTokens)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_refresh_tokens_user");
+        });
+
+        modelBuilder.Entity<PasswordResetToken>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("PRIMARY");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("current_timestamp()");
+            entity.HasOne(d => d.User).WithMany(p => p.PasswordResetTokens)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_password_reset_user");
+        });
+
+        modelBuilder.Entity<EmailVerificationToken>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("PRIMARY");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("current_timestamp()");
+            entity.HasOne(d => d.User).WithMany(p => p.EmailVerificationTokens)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_email_verification_user");
+        });
+
         modelBuilder.Entity<Vote>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PRIMARY");
@@ -321,7 +358,7 @@ public partial class schoolmusicContext : DbContext
                 .HasConstraintName("fk_votes_queue");
 
             entity.HasOne(d => d.User).WithMany(p => p.Votes)
-                .OnDelete(DeleteBehavior.ClientSetNull)
+                .OnDelete(DeleteBehavior.Cascade)
                 .HasConstraintName("fk_votes_user");
         });
 

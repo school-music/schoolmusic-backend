@@ -190,9 +190,16 @@ Konfiguracja aplikacji zarządzana jest przez zmienne środowiskowe (zgodnie ze 
 | `Jwt__Key` | *(wymagana, min. 32 bajty)* | Klucz symetryczny do podpisywania tokenów JWT |
 | `Jwt__Issuer` | `SchoolMusicAPI` | Wystawca tokenów JWT |
 | `Jwt__Audience` | `SchoolMusicApp` | Odbiorca tokenów JWT |
+| `Jwt__AccessTokenExpirationMinutes` | `15` | Czas ważności krótkotrwałego tokenu dostępu JWT w minutach |
+| `Jwt__RefreshTokenExpirationDays` | `7` | Czas ważności rotowanego tokenu odświeżania sesji w dniach |
 | `Auth__AllowLocalRegistration` | `false` | Publiczna rejestracja kont lokalnych (włączana tylko w profilu demo) |
+| `Auth__EmailLoginEnabled` | `true` | Obsługa zweryfikowanych adresów e-mail do logowania i samodzielnego resetu hasła |
+| `Auth__PublicBaseUrl` | `http://localhost:8080` | Publiczny bazowy URL używany w linkach weryfikacji i resetu hasła |
+| `Smtp__Enabled` | `false` | Włącza wysyłkę wiadomości e-mail przez serwer SMTP na produkcji |
+| `Smtp__Host` | *(opcjonalne)* | Adres hosta serwera SMTP (wymagany przy `Smtp:Enabled=true`) |
 | `Scheduler__Enabled` | `true` | Czy ta instancja steruje automatycznym odtwarzaniem; tylko jedna instancja może mieć `true` |
 | `School__TimeZone` | `Europe/Warsaw` | Strefa czasowa szkoły używana przez harmonogram i statystyki |
+| `Audio__LibVlcOutput` | *(wg systemu)* | Moduł wyjścia audio LibVLC (np. `dummy` w lokalnym Dockerze, `alsa`/`pulse` na Linux PA) |
 | `Spotify__ClientId` | *(opcjonalne)* | Identyfikator aplikacji Spotify Developer Dashboard |
 | `Spotify__ClientSecret` | *(opcjonalne)* | Sekret aplikacji Spotify Developer Dashboard |
 | `Spotify__RedirectUri` | `http://localhost:8080/api/spotify-playback/callback` | Callback autoryzacji Spotify OAuth |
@@ -224,7 +231,7 @@ Jeśli chcesz rozwijać aplikację lokalnie na maszynie bez kontenera API:
 
 ## Testy jednostkowe i integracyjne
 
-Projekt posiada rozbudowany pakiet **245 zautomatyzowanych testów** sprawdzających logikę algorytmów kolejkowania, harmonogramu, moderacji oraz autoryzacji:
+Projekt posiada rozbudowany pakiet zautomatyzowanych testów jednostkowych, integracyjnych oraz walidacji schematu OpenAPI sprawdzających logikę algorytmów kolejkowania, harmonogramu, moderacji, autoryzacji i formatu `ProblemDetails`:
 
 ```bash
 # Uruchomienie wszystkich testów
@@ -232,6 +239,9 @@ dotnet test schoolmusic-backend.sln
 
 # Uruchomienie testów z raportem pokrycia kodu (Coverage)
 dotnet test --collect:"XPlat Code Coverage"
+
+# Weryfikacja uruchomienia Docker Compose na czystych wolumenach (MariaDB + Redis + API)
+./scripts/verify-compose.sh
 ```
 
 Każdy Pull Request oraz push do gałęzi `main` jest automatycznie testowany przez potok **GitHub Actions CI**.

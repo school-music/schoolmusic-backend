@@ -11,7 +11,10 @@ namespace schoolmusic_backend.Services
         string Cover,
         int DurationMs,
         int PlaysCount,
-        int TotalVotes
+        int TotalVotes,
+        string? SpotifyId = null,
+        string Source = "other",
+        string? SongUrl = null
     );
 
     public record TopArtistRankingDto(
@@ -31,7 +34,10 @@ namespace schoolmusic_backend.Services
         DateTime PlayedAt,
         int BreakId,
         int? BreakNumber,
-        int VotesCount
+        int VotesCount,
+        string? SpotifyId = null,
+        string Source = "other",
+        string? SongUrl = null
     );
 
     public interface IRankingsService
@@ -125,7 +131,10 @@ namespace schoolmusic_backend.Services
                         Cover: song.Cover ?? "",
                         DurationMs: song.DurationMs,
                         PlaysCount: x.PlaysCount,
-                        TotalVotes: x.TotalVotes
+                        TotalVotes: x.TotalVotes,
+                        SpotifyId: song.SpotifyId,
+                        Source: song.Source,
+                        SongUrl: song.SongUrl
                     );
                 })
                 .ToList();
@@ -214,7 +223,10 @@ namespace schoolmusic_backend.Services
                     h.PlayedAt,
                     h.BreakId,
                     h.Break.BreakNumber,
-                    h.Votes
+                    h.Votes,
+                    h.Song.SpotifyId,
+                    h.Song.Source,
+                    h.Song.SongUrl
                 ))
                 .ToListAsync();
 

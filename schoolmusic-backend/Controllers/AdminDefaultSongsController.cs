@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Models;
 
 namespace schoolmusic_backend.Controllers
@@ -15,10 +16,18 @@ namespace schoolmusic_backend.Controllers
         string? Cover,
         string? Genre,
         string? SongUrl,
-        bool IsActive
+        bool IsActive,
+        string? SpotifyId = null,
+        string Source = "other"
     );
 
     public record AddDefaultSongDto(int SongId);
+
+    public sealed record RemoveDefaultSongResponseDto(
+        string Message,
+        int Id,
+        int SongId
+    );
 
     /// <summary>
     /// Kontroler panelu administracyjnego do zarządzania listą utworów domyślnych (fallback, gdy kolejka jest pusta).
@@ -26,6 +35,7 @@ namespace schoolmusic_backend.Controllers
     [Route("api/admin/default-songs")]
     [ApiController]
     [Authorize(Roles = "admin,head_admin")]
+    [Produces("application/json")]
     public class AdminDefaultSongsController : ControllerBase
     {
         private readonly schoolmusicContext _context;
@@ -39,6 +49,9 @@ namespace schoolmusic_backend.Controllers
         /// Pobiera listę wszystkich utworów domyślnych wraz z ich metadanymi.
         /// </summary>
         [HttpGet]
+        [ProducesResponseType<IReadOnlyList<DefaultSongItemDto>>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> GetDefaultSongs()
         {
             var items = await _context.DefaultSongs
@@ -55,7 +68,9 @@ namespace schoolmusic_backend.Controllers
                     d.Song.Cover,
                     d.Song.Genre,
                     d.Song.SongUrl,
-                    d.Song.IsActive
+                    d.Song.IsActive,
+                    d.Song.SpotifyId,
+                    d.Song.Source
                 ))
                 .ToListAsync();
 
@@ -66,23 +81,29 @@ namespace schoolmusic_backend.Controllers
         /// Dodaje utwór do listy utworów domyślnych.
         /// </summary>
         [HttpPost]
+        [ProducesResponseType<DefaultSongItemDto>(StatusCodes.Status201Created)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
         public async Task<IActionResult> AddDefaultSong([FromBody] AddDefaultSongDto dto)
         {
             var song = await _context.Songs.Include(s => s.Artist).FirstOrDefaultAsync(s => s.Id == dto.SongId);
             if (song == null)
             {
-                return NotFound(new { Message = "Utwór o podanym ID nie istnieje." });
+                return this.Create(StatusCodes.Status404NotFound, "Utwór o podanym ID nie istnieje.");
             }
 
             if (!song.IsActive)
             {
-                return BadRequest(new { Message = "Nie można dodać nieaktywnego utworu do listy domyślnej." });
+                return this.Create(StatusCodes.Status400BadRequest, "Nie można dodać nieaktywnego utworu do listy domyślnej.");
             }
 
             bool alreadyExists = await _context.DefaultSongs.AnyAsync(d => d.SongId == dto.SongId);
             if (alreadyExists)
             {
-                return Conflict(new { Message = "Ten utwór znajduje się już na liście utworów domyślnych." });
+                return this.Create(StatusCodes.Status409Conflict, "Ten utwór znajduje się już na liście utworów domyślnych.");
             }
 
             var defaultSong = new DefaultSong
@@ -103,7 +124,9 @@ namespace schoolmusic_backend.Controllers
                 song.Cover,
                 song.Genre,
                 song.SongUrl,
-                song.IsActive
+                song.IsActive,
+                song.SpotifyId,
+                song.Source
             );
 
             return CreatedAtAction(nameof(GetDefaultSongs), new { id = defaultSong.Id }, resultDto);
@@ -113,6 +136,10 @@ namespace schoolmusic_backend.Controllers
         /// Usuwa utwór z listy utworów domyślnych po identyfikatorze wpisu lub identyfikatorze utworu.
         /// </summary>
         [HttpDelete("{id:int}")]
+        [ProducesResponseType<RemoveDefaultSongResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> RemoveDefaultSong(int id)
         {
             var defaultSong = await _context.DefaultSongs
@@ -121,18 +148,17 @@ namespace schoolmusic_backend.Controllers
 
             if (defaultSong == null)
             {
-                return NotFound(new { Message = "Wpis domyślnego utworu nie został znaleziony." });
+                return this.Create(StatusCodes.Status404NotFound, "Wpis domyślnego utworu nie został znaleziony.");
             }
 
             _context.DefaultSongs.Remove(defaultSong);
             await _context.SaveChangesAsync();
 
-            return Ok(new
-            {
-                Message = $"Pomyślnie usunięto utwór '{defaultSong.Song?.Title ?? id.ToString()}' z listy utworów domyślnych.",
-                Id = defaultSong.Id,
-                SongId = defaultSong.SongId
-            });
+            return Ok(new RemoveDefaultSongResponseDto(
+                Message: $"Pomyślnie usunięto utwór '{defaultSong.Song?.Title ?? id.ToString()}' z listy utworów domyślnych.",
+                Id: defaultSong.Id,
+                SongId: defaultSong.SongId
+            ));
         }
     }
 }

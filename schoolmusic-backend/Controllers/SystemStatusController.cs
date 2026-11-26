@@ -6,6 +6,7 @@ namespace schoolmusic_backend.Controllers
 {
     [Route("api/system")]
     [ApiController]
+    [Produces("application/json")]
     public class SystemStatusController : ControllerBase
     {
         private readonly ISystemStatusService _statusService;
@@ -21,6 +22,7 @@ namespace schoolmusic_backend.Controllers
         [HttpGet("status")]
         [AllowAnonymous]
         [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+        [ProducesResponseType<SystemStatusDto>(StatusCodes.Status200OK)]
         public async Task<IActionResult> GetStatus(CancellationToken cancellationToken)
         {
             var status = await _statusService.GetStatusAsync(cancellationToken);

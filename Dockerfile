@@ -17,18 +17,17 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libvlc-dev \
     vlc-plugin-base \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 schoolmusic \
+    && useradd --system --uid 10001 --gid schoolmusic --create-home schoolmusic \
+    && mkdir -p /app/recordings \
+    && chown schoolmusic:schoolmusic /app /app/recordings \
+    && if getent group audio >/dev/null; then usermod -aG audio schoolmusic; fi
 
-COPY --from=build /app/publish .
+COPY --chown=schoolmusic:schoolmusic --from=build /app/publish .
 
 # Aplikacja działa jako użytkownik bez uprawnień roota. Członkostwo w grupie audio
 # jest dodawane tylko wtedy, gdy obraz udostępnia tę grupę.
-RUN groupadd --system --gid 10001 schoolmusic \
-    && useradd --system --uid 10001 --gid schoolmusic --create-home schoolmusic \
-    && mkdir -p /app/recordings \
-    && chown -R schoolmusic:schoolmusic /app \
-    && if getent group audio >/dev/null; then usermod -aG audio schoolmusic; fi
-
 USER schoolmusic
 
 EXPOSE 8080

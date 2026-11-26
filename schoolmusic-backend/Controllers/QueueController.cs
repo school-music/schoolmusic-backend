@@ -7,20 +7,28 @@ using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers
 {
+    public sealed record ReorderQueueResponseDto(
+        string Message,
+        int BreakId,
+        IReadOnlyList<int> NewOrder
+    );
+
     /// <summary>
     /// Kontroler API obsługujący kolejkę utworów: proponowanie piosenek, głosowanie i cofanie głosów, pobieranie listy
-    /// utworów dla przerwy, generowanie harmonogramu przerwy, pobieranie aktualnie odtwarzanego utworu oraz
-    /// archiwizacja przerw.
+    /// utworów dla przerwy, wyznaczanie docelowej przerwy do głosowania, generowanie harmonogramu przerwy,
+    /// pobieranie aktualnie odtwarzanego utworu oraz archiwizację przerw.
     /// </summary>
     [Route("api/[controller]")]
     [ApiController]
     [Authorize]
+    [Produces("application/json")]
     public class QueueController : ControllerBase
     {
         private readonly IQueueService _queueService;
         private readonly IRadioStatusService _radioStatusService;
         private readonly IBreakService _breakService;
         private readonly schoolmusicContext _context;
+        private readonly IVotingTargetService _votingTargetService;
         private readonly ILogger<QueueController>? _logger;
 
         public QueueController(
@@ -28,43 +36,79 @@ namespace schoolmusic_backend.Controllers
             IRadioStatusService radioStatusService,
             IBreakService breakService,
             schoolmusicContext context,
-            ILogger<QueueController>? logger = null)
+            ILogger<QueueController>? logger = null,
+            IVotingTargetService? votingTargetService = null)
         {
             _queueService = queueService;
             _radioStatusService = radioStatusService;
             _breakService = breakService;
             _context = context;
             _logger = logger;
+            _votingTargetService = votingTargetService ?? new VotingTargetService(context);
         }
 
-        /// <summary>
-        /// Zwraca akcję HTTP z kodem statusu pobranym z obiektu ServiceResult; zawiera Data przy powodzeniu lub obiekt
-        /// z polem Message przy niepowodzeniu
-        /// </summary>
-        /// <remarks>Treść odpowiedzi zależy od wartości pola Success w przekazanym obiekcie.</remarks>
-        /// <returns>IActionResult z kodem statusu result.StatusCode; jeśli result.Success jest true, treść odpowiedzi to
-        /// result.Data, w przeciwnym razie obiekt zawierający pole Message</returns>
         private IActionResult FromResult<T>(ServiceResult<T> result)
         {
-            return StatusCode(result.StatusCode, result.Success ? result.Data : new { Message = result.Message });
+            if (result.Success)
+            {
+                return StatusCode(result.StatusCode, result.Data);
+            }
+
+            return this.Create(result.StatusCode, result.Message ?? "Wystąpił błąd.");
         }
 
         /// <summary>
-        /// Pobiera listę utworów zgłoszonych na daną przerwę (Live ranking).
+        /// Zwraca przerwę kwalifikującą się do głosowania, czas odcięcia ze strefą czasową oraz powód otwarcia/zamknięcia.
+        /// </summary>
+        [HttpGet("voting-target")]
+        [AllowAnonymous]
+        [ProducesResponseType<VotingTargetDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetVotingTarget(
+            [FromQuery] int? breakId = null,
+            CancellationToken cancellationToken = default)
+        {
+            var target = await _votingTargetService.GetVotingTargetAsync(breakId, cancellationToken);
+            if (breakId.HasValue && target.ReasonCode == "break_not_found")
+            {
+                return this.Create(StatusCodes.Status404NotFound, target.Reason);
+            }
+
+            return Ok(target);
+        }
+
+        /// <summary>
+        /// Pobiera listę utworów zgłoszonych na daną przerwę (Live ranking) wraz ze statusem kolejki,
+        /// głosem bieżącego użytkownika i metadanymi Spotify.
         /// Obsługuje zarówno /api/queue/break/{breakId}, jak i /api/queue?breakId={breakId}.
         /// </summary>
         [HttpGet]
         [HttpGet("break/{breakId:int}")]
         [AllowAnonymous]
+        [ProducesResponseType<QueueForBreakResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> GetQueueForBreak(
             [FromRoute] int? breakId = null,
-            [FromQuery(Name = "breakId")] int? queryBreakId = null)
+            [FromQuery(Name = "breakId")] int? queryBreakId = null,
+            CancellationToken cancellationToken = default)
         {
             var effectiveBreakId = breakId ?? queryBreakId;
             if (!effectiveBreakId.HasValue)
             {
-                var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
-                effectiveBreakId = allBreaks.FirstOrDefault()?.Id ?? 1;
+                var target = await _votingTargetService.GetVotingTargetAsync(null, cancellationToken);
+                if (target.EligibleBreakId.HasValue)
+                {
+                    effectiveBreakId = target.EligibleBreakId.Value;
+                }
+                else if (target.BreakId.HasValue)
+                {
+                    effectiveBreakId = target.BreakId.Value;
+                }
+                else
+                {
+                    var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync(cancellationToken);
+                    effectiveBreakId = allBreaks.FirstOrDefault()?.Id ?? 1;
+                }
             }
 
             int? currentUserId = HttpContext.GetCurrentUserId();
@@ -77,12 +121,14 @@ namespace schoolmusic_backend.Controllers
         /// </summary>
         [HttpGet("break/{breakId:int}/plan")]
         [AllowAnonymous]
+        [ProducesResponseType<ScheduledBreakPlan>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> GetBreakPlan(int breakId)
         {
             var breakEntity = await _context.Breaks.FindAsync(breakId);
             if (breakEntity == null)
             {
-                return NotFound(new { Message = "Nie znaleziono przerwy o podanym identyfikatorze." });
+                return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono przerwy o podanym identyfikatorze.");
             }
 
             DateTime end = breakEntity.EndsAt;
@@ -109,9 +155,10 @@ namespace schoolmusic_backend.Controllers
         /// </summary>
         [HttpGet("now-playing")]
         [AllowAnonymous]
+        [ProducesResponseType<RadioNowPlayingResponseDto>(StatusCodes.Status200OK)]
         public async Task<IActionResult> GetNowPlaying()
         {
-            var status = await _radioStatusService.GetNowPlayingAsync();
+            var status = await _radioStatusService.GetNowPlayingDtoAsync();
             return Ok(status);
         }
 
@@ -121,12 +168,20 @@ namespace schoolmusic_backend.Controllers
         /// </summary>
         [HttpPost]
         [HttpPost("propose")]
+        [ProducesResponseType<ProposeSongApprovedDto>(StatusCodes.Status201Created)]
+        [ProducesResponseType<ProposeSongPendingDto>(StatusCodes.Status202Accepted)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status503ServiceUnavailable)]
         public async Task<IActionResult> ProposeSong([FromBody] ProposeSongDto dto)
         {
             int? currentUserId = HttpContext.GetCurrentUserId();
             if (currentUserId == null)
             {
-                return Unauthorized(new { Message = "Musisz być zalogowany, aby zgłosić piosenkę." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Musisz być zalogowany, aby zgłosić piosenkę.");
             }
 
             var result = await _queueService.ProposeSongAsync(dto, currentUserId.Value);
@@ -137,12 +192,18 @@ namespace schoolmusic_backend.Controllers
         /// Oddaje głos na utwór w kolejce (lub dodaje utwór z greenlisty i oddaje na niego głos)
         /// </summary>
         [HttpPost("vote")]
+        [ProducesResponseType<VoteResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
         public async Task<IActionResult> Vote([FromBody] VoteRequestDto dto)
         {
             int? currentUserId = HttpContext.GetCurrentUserId();
             if (currentUserId == null)
             {
-                return Unauthorized(new { Message = "Musisz być zalogowany, aby oddać głos." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Musisz być zalogowany, aby oddać głos.");
             }
 
             var result = await _queueService.VoteAsync(dto, currentUserId.Value);
@@ -153,12 +214,16 @@ namespace schoolmusic_backend.Controllers
         /// Cofa oddany wcześniej głos na utwór w kolejce
         /// </summary>
         [HttpDelete("vote/{queueItemId:int}")]
+        [ProducesResponseType<VoteResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> RemoveVote(int queueItemId)
         {
             int? currentUserId = HttpContext.GetCurrentUserId();
             if (currentUserId == null)
             {
-                return Unauthorized(new { Message = "Musisz być zalogowany, aby cofnąć głos." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Musisz być zalogowany, aby cofnąć głos.");
             }
 
             var result = await _queueService.RemoveVoteAsync(queueItemId, currentUserId.Value);
@@ -171,6 +236,10 @@ namespace schoolmusic_backend.Controllers
         /// </summary>
         [HttpPost("break/{breakId:int}/archive")]
         [Authorize(Roles = "mod,admin,head_admin")]
+        [ProducesResponseType<ArchiveBreakResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> ArchiveBreak(int breakId)
         {
             var result = await _queueService.ArchiveBreakAsync(breakId);
@@ -182,11 +251,17 @@ namespace schoolmusic_backend.Controllers
         /// </summary>
         [HttpPut("break/{breakId:int}/order")]
         [Authorize(Roles = "mod,admin,head_admin")]
+        [ProducesResponseType<ReorderQueueResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> ReorderQueue(int breakId, [FromBody] ReorderQueueDto dto)
         {
             if (dto.QueueItemIds == null || dto.QueueItemIds.Count == 0)
             {
-                return BadRequest(new { Message = "Lista identyfikatorów utworów nie może być pusta." });
+                return this.Create(StatusCodes.Status400BadRequest, "Lista identyfikatorów utworów nie może być pusta.");
             }
 
             var items = await _context.QueueItems
@@ -195,7 +270,7 @@ namespace schoolmusic_backend.Controllers
 
             if (items.Count == 0)
             {
-                return NotFound(new { Message = "Brak utworów w kolejce dla podanej przerwy." });
+                return this.Create(StatusCodes.Status404NotFound, "Brak utworów w kolejce dla podanej przerwy.");
             }
 
             var itemDict = items.ToDictionary(q => q.Id);
@@ -203,22 +278,19 @@ namespace schoolmusic_backend.Controllers
             {
                 if (!itemDict.ContainsKey(id))
                 {
-                    return BadRequest(new { Message = $"Utwór o identyfikatorze {id} nie należy do przerwy {breakId}." });
+                    return this.Create(StatusCodes.Status400BadRequest, $"Utwór o identyfikatorze {id} nie należy do przerwy {breakId}.");
                 }
             }
 
-            // Transakcyjna zmiana order_index z ujemnymi indeksami tymczasowymi dla uniknięcia kolizji uniq_break_order
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
-                // Krok 1: Wartości ujemne tymczasowe
                 for (int i = 0; i < dto.QueueItemIds.Count; i++)
                 {
                     itemDict[dto.QueueItemIds[i]].OrderIndex = -(i + 1);
                 }
                 await _context.SaveChangesAsync();
 
-                // Krok 2: Właściwe indeksy
                 for (int i = 0; i < dto.QueueItemIds.Count; i++)
                 {
                     itemDict[dto.QueueItemIds[i]].OrderIndex = i + 1;
@@ -233,17 +305,16 @@ namespace schoolmusic_backend.Controllers
                 _logger?.LogError(ex,
                     "Nie udało się zmienić kolejności utworów w kolejce przerwy {BreakId}.",
                     breakId);
-                return StatusCode(StatusCodes.Status500InternalServerError, new { Message = "Nie udało się zmienić kolejności utworów. Spróbuj ponownie." });
+                return this.Create(StatusCodes.Status500InternalServerError, "Nie udało się zmienić kolejności utworów. Spróbuj ponownie.");
             }
 
             await _queueService.BroadcastQueueAsync(breakId);
 
-            return Ok(new
-            {
-                Message = "Zaktualizowano kolejność utworów w kolejce.",
-                BreakId = breakId,
-                NewOrder = dto.QueueItemIds
-            });
+            return Ok(new ReorderQueueResponseDto(
+                Message: "Zaktualizowano kolejność utworów w kolejce.",
+                BreakId: breakId,
+                NewOrder: dto.QueueItemIds
+            ));
         }
     }
 

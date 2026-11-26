@@ -4,7 +4,7 @@ using Microsoft.Extensions.Options;
 namespace schoolmusic_backend.Configuration;
 
 /// <summary>
-/// Konfiguracja tokenów JWT używanych do uwierzytelniania użytkowników.
+/// Konfiguracja tokenów JWT oraz tokenów odświeżania używanych do uwierzytelniania użytkowników.
 /// </summary>
 public sealed class JwtOptions
 {
@@ -14,6 +14,16 @@ public sealed class JwtOptions
     public string Audience { get; set; } = string.Empty;
     public string Key { get; set; } = string.Empty;
     public int ExpirationHours { get; set; } = 12;
+    public int? AccessTokenExpirationMinutes { get; set; }
+    public int RefreshTokenExpirationDays { get; set; } = 14;
+
+    public TimeSpan GetAccessTokenLifetime() =>
+        AccessTokenExpirationMinutes.HasValue
+            ? TimeSpan.FromMinutes(AccessTokenExpirationMinutes.Value)
+            : TimeSpan.FromHours(ExpirationHours);
+
+    public TimeSpan GetRefreshTokenLifetime() =>
+        TimeSpan.FromDays(RefreshTokenExpirationDays);
 }
 
 /// <summary>
@@ -39,6 +49,10 @@ public sealed class JwtOptionsValidator(IWebHostEnvironment environment) : IVali
             errors.Add("Jwt:Audience jest wymagany.");
         if (options.ExpirationHours is < 1 or > 24)
             errors.Add("Jwt:ExpirationHours musi mieścić się w zakresie od 1 do 24 godzin.");
+        if (options.AccessTokenExpirationMinutes is < 1 or > 1440)
+            errors.Add("Jwt:AccessTokenExpirationMinutes musi mieścić się w zakresie od 1 do 1440 minut.");
+        if (options.RefreshTokenExpirationDays is < 1 or > 90)
+            errors.Add("Jwt:RefreshTokenExpirationDays musi mieścić się w zakresie od 1 do 90 dni.");
 
         if (string.IsNullOrWhiteSpace(options.Key))
         {

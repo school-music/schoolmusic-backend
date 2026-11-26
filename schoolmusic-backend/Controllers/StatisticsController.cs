@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers
@@ -11,6 +12,7 @@ namespace schoolmusic_backend.Controllers
     [Route("api/statistics")]
     [ApiController]
     [Authorize(Roles = "admin,head_admin")]
+    [Produces("application/json")]
     public class StatisticsController : ControllerBase
     {
         private readonly IStatisticsService _statisticsService;
@@ -21,17 +23,15 @@ namespace schoolmusic_backend.Controllers
         }
 
         /// <summary>
-        /// Zwraca komplet statystyk dla dashboardu: liczbę oddanych głosów (ogółem, w bieżącym tygodniu, dzisiaj),
-        /// rozkład najpopularniejszych gatunków, aktywność z ostatnich 7 dni oraz TOP 10 najczęściej odtwarzanych
-        /// utworów i wykonawców.
+        /// Zwraca komplet statystyk dla dashboardu: liczbę oddanych głosów, rozkład gatunków,
+        /// aktywność z ostatnich 7 dni oraz TOP 10 najczęściej odtwarzanych utworów i wykonawców.
         /// </summary>
-        /// <remarks>
-        /// Wynik jest cache'owany w Redis na 60 sekund, więc dane mogą być nieaktualne maksymalnie o ten czas.
-        /// Liczniki głosów obejmują wyłącznie aktualnie otwarte przerwy — po archiwizacji przerwy jej głosy
-        /// są usuwane z bazy i pozostają jedynie w historii odtworzeń.
-        /// </remarks>
         [HttpGet("dashboard")]
         [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+        [ProducesResponseType<DashboardStatisticsDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status503ServiceUnavailable)]
         public async Task<IActionResult> GetDashboard(CancellationToken cancellationToken)
         {
             try
@@ -42,13 +42,14 @@ namespace schoolmusic_backend.Controllers
             catch (StatisticsUnavailableException ex)
             {
                 Response.Headers.RetryAfter = "15";
-                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
-                {
-                    StatusCode = 503,
-                    Message = ex.Message,
-                    IsAvailable = false,
-                    RetryAfter = 15
-                });
+                return this.Create(
+                    StatusCodes.Status503ServiceUnavailable,
+                    ex.Message,
+                    extensions: new Dictionary<string, object?>
+                    {
+                        ["isAvailable"] = false,
+                        ["retryAfter"] = 15
+                    });
             }
         }
     }

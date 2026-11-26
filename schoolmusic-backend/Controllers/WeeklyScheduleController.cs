@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 
@@ -10,6 +11,26 @@ namespace schoolmusic_backend.Controllers
     public record UpdateWeeklyBreakDto(bool MusicEnabled);
 
     public record WeeklyDayDto(sbyte Weekday, string DayName, bool MusicEnabled);
+
+    public sealed record UpdateWeeklyDayResponseDto(
+        string Message,
+        sbyte Weekday,
+        bool MusicEnabled
+    );
+
+    public sealed record WeeklyDayBreaksResponseDto(
+        sbyte Weekday,
+        string DayName,
+        bool DayMusicEnabled,
+        IReadOnlyList<WeeklyBreakDetailDto> Breaks
+    );
+
+    public sealed record UpdateWeeklyBreakResponseDto(
+        string Message,
+        sbyte Weekday,
+        int BreakNumber,
+        bool MusicEnabled
+    );
 
     public record WeeklyBreakDetailDto(
         sbyte BreakNumber,
@@ -77,6 +98,7 @@ namespace schoolmusic_backend.Controllers
     /// </summary>
     [Route("api/schedule")]
     [ApiController]
+    [Produces("application/json")]
     public class WeeklyScheduleController : ControllerBase
     {
         private readonly schoolmusicContext _context;
@@ -118,6 +140,7 @@ namespace schoolmusic_backend.Controllers
         /// </summary>
         [HttpGet("weekly")]
         [AllowAnonymous]
+        [ProducesResponseType<IReadOnlyList<WeeklyDayDto>>(StatusCodes.Status200OK)]
         public async Task<IActionResult> GetWeeklySchedule()
         {
             var schedules = await _context.WeeklySchedules
@@ -138,15 +161,17 @@ namespace schoolmusic_backend.Controllers
         /// <summary>
         /// Zmienia flagę włączenia muzyki dla całego danego dnia tygodnia
         /// </summary>
-        /// <param name="weekday">Dzień tygodnia (1 = Poniedziałek, 7 = Niedziela)</param>
-        /// <param name="dto">Nowy stan włączenia muzyki</param>
         [HttpPut("weekly/{weekday:int}")]
         [Authorize(Roles = "admin,head_admin")]
+        [ProducesResponseType<UpdateWeeklyDayResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> UpdateWeeklyDay(int weekday, [FromBody] UpdateWeeklyDayDto dto)
         {
             if (weekday < 1 || weekday > 7)
             {
-                return BadRequest(new { Message = "Numer dnia tygodnia musi być w przedziale 1–7 (1 = Poniedziałek, 7 = Niedziela)." });
+                return this.Create(StatusCodes.Status400BadRequest, "Numer dnia tygodnia musi być w przedziale 1–7 (1 = Poniedziałek, 7 = Niedziela).");
             }
 
             sbyte day = (sbyte)weekday;
@@ -167,12 +192,11 @@ namespace schoolmusic_backend.Controllers
 
             await _context.SaveChangesAsync();
             NotifyScheduleUpdated();
-            return Ok(new
-            {
-                Message = $"Zaktualizowano konfigurację dla dnia {DayNames.GetValueOrDefault(day, day.ToString())}.",
-                Weekday = day,
-                dto.MusicEnabled
-            });
+            return Ok(new UpdateWeeklyDayResponseDto(
+                Message: $"Zaktualizowano konfigurację dla dnia {DayNames.GetValueOrDefault(day, day.ToString())}.",
+                Weekday: day,
+                MusicEnabled: dto.MusicEnabled
+            ));
         }
 
         /// <summary>
@@ -180,11 +204,13 @@ namespace schoolmusic_backend.Controllers
         /// </summary>
         [HttpGet("weekly/{weekday:int}/breaks")]
         [AllowAnonymous]
+        [ProducesResponseType<WeeklyDayBreaksResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
         public async Task<IActionResult> GetWeeklyDayBreaks(int weekday)
         {
             if (weekday < 1 || weekday > 7)
             {
-                return BadRequest(new { Message = "Numer dnia tygodnia musi być w przedziale 1–7." });
+                return this.Create(StatusCodes.Status400BadRequest, "Numer dnia tygodnia musi być w przedziale 1–7.");
             }
 
             sbyte day = (sbyte)weekday;
@@ -212,15 +238,14 @@ namespace schoolmusic_backend.Controllers
                     MusicEnabled: isMusicEnabled,
                     IsOverridden: isOverridden
                 );
-            });
+            }).ToList();
 
-            return Ok(new
-            {
-                Weekday = day,
-                DayName = DayNames.GetValueOrDefault(day, day.ToString()),
-                DayMusicEnabled = defaultDayEnabled,
-                Breaks = result
-            });
+            return Ok(new WeeklyDayBreaksResponseDto(
+                Weekday: day,
+                DayName: DayNames.GetValueOrDefault(day, day.ToString()),
+                DayMusicEnabled: defaultDayEnabled,
+                Breaks: result
+            ));
         }
 
         /// <summary>
@@ -228,11 +253,16 @@ namespace schoolmusic_backend.Controllers
         /// </summary>
         [HttpPut("weekly/{weekday:int}/breaks/{breakNo:int}")]
         [Authorize(Roles = "admin,head_admin")]
+        [ProducesResponseType<UpdateWeeklyBreakResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> UpdateWeeklyBreak(int weekday, int breakNo, [FromBody] UpdateWeeklyBreakDto dto)
         {
             if (weekday < 1 || weekday > 7)
             {
-                return BadRequest(new { Message = "Numer dnia tygodnia musi być w przedziale 1–7." });
+                return this.Create(StatusCodes.Status400BadRequest, "Numer dnia tygodnia musi być w przedziale 1–7.");
             }
 
             sbyte day = (sbyte)weekday;
@@ -241,7 +271,7 @@ namespace schoolmusic_backend.Controllers
             var templateExists = await _context.BreakTemplates.AnyAsync(t => t.BreakNumber == breakNumber);
             if (!templateExists)
             {
-                return NotFound(new { Message = $"Szablon przerwy nr {breakNo} nie istnieje." });
+                return this.Create(StatusCodes.Status404NotFound, $"Szablon przerwy nr {breakNo} nie istnieje.");
             }
 
             var setting = await _context.WeeklyBreakSettings
@@ -264,21 +294,21 @@ namespace schoolmusic_backend.Controllers
 
             await _context.SaveChangesAsync();
             NotifyScheduleUpdated();
-            return Ok(new
-            {
-                Message = $"Zaktualizowano przerwę #{breakNo} w dniu {DayNames.GetValueOrDefault(day, day.ToString())}.",
-                Weekday = day,
-                BreakNumber = breakNo,
-                dto.MusicEnabled
-            });
+            return Ok(new UpdateWeeklyBreakResponseDto(
+                Message: $"Zaktualizowano przerwę #{breakNo} w dniu {DayNames.GetValueOrDefault(day, day.ToString())}.",
+                Weekday: day,
+                BreakNumber: breakNo,
+                MusicEnabled: dto.MusicEnabled
+            ));
         }
 
         /// <summary>
         /// Zwraca zagregowany widok kalendarza dla zadanego przedziału dat (maks. 31 dni).
-        /// Uwzględnia standardowe szablony dzwonków, reguły tygodniowe, dni wolne, wyjątki oraz wydarzenia dźwiękowe.
         /// </summary>
         [HttpGet("calendar")]
         [AllowAnonymous]
+        [ProducesResponseType<CalendarScheduleResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
         public async Task<IActionResult> GetCalendarSchedule(
             [FromQuery] DateOnly? from = null,
             [FromQuery] DateOnly? to = null)
@@ -288,13 +318,13 @@ namespace schoolmusic_backend.Controllers
 
             if (startDate > endDate)
             {
-                return BadRequest(new { Message = "Data początkowa ('from') nie może być późniejsza niż data końcowa ('to')." });
+                return this.Create(StatusCodes.Status400BadRequest, "Data początkowa ('from') nie może być późniejsza niż data końcowa ('to').");
             }
 
             int totalDays = endDate.DayNumber - startDate.DayNumber + 1;
             if (totalDays > 31)
             {
-                return BadRequest(new { Message = "Maksymalny dozwolony zakres kalendarza wynosi 31 dni." });
+                return this.Create(StatusCodes.Status400BadRequest, "Maksymalny dozwolony zakres kalendarza wynosi 31 dni.");
             }
 
             var exceptionDays = await _context.ExceptionDays

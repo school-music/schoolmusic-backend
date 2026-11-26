@@ -43,13 +43,25 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       Features__SwaggerEnabled: "false"
       Auth__AllowLocalRegistration: "false"
+      Auth__EmailLoginEnabled: ${AUTH_EMAIL_LOGIN_ENABLED:-true}
+      Auth__PublicBaseUrl: ${AUTH_PUBLIC_BASE_URL:-http://localhost:8080}
       Scheduler__Enabled: "true"
       School__TimeZone: Europe/Warsaw
+      Audio__LibVlcOutput: ${AUDIO_LIBVLC_OUTPUT:-dummy}
+      Smtp__Enabled: ${SMTP_ENABLED:-false}
+      Smtp__Host: ${SMTP_HOST:-}
+      Smtp__Port: ${SMTP_PORT:-587}
+      Smtp__UseSsl: ${SMTP_USE_SSL:-true}
+      Smtp__Username: ${SMTP_USERNAME:-}
+      Smtp__Password: ${SMTP_PASSWORD:-}
+      Smtp__FromAddress: ${SMTP_FROM_ADDRESS:-}
       ConnectionString__database: "server=db;port=3306;database=schoolmusic;user=${DB_USER:-schoolmusic};password=${DB_PASSWORD:?Ustaw DB_PASSWORD w pliku .env};"
       ConnectionString__redis: "redis:6379,password=${REDIS_PASSWORD:?Ustaw REDIS_PASSWORD w pliku .env}"
       Jwt__Issuer: SchoolMusicAPI
       Jwt__Audience: SchoolMusicApp
       Jwt__Key: ${JWT_KEY:?Ustaw JWT_KEY w pliku .env}
+      Jwt__AccessTokenExpirationMinutes: ${JWT_ACCESS_EXPIRATION_MINUTES:-15}
+      Jwt__RefreshTokenExpirationDays: ${JWT_REFRESH_EXPIRATION_DAYS:-7}
       Spotify__ClientId: ${SPOTIFY_CLIENT_ID:-}
       Spotify__ClientSecret: ${SPOTIFY_CLIENT_SECRET:-}
       Spotify__RedirectUri: ${SPOTIFY_REDIRECT_URI:-}

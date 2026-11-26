@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers;
@@ -10,6 +11,7 @@ namespace schoolmusic_backend.Controllers;
 [ApiController]
 [Route("api/spotify-playback")]
 [Authorize(Roles = "admin,head_admin")]
+[Produces("application/json")]
 public sealed class SpotifyPlaybackController(
     ISpotifyConnectPlaybackService spotify,
     IBreakSchedulerService? scheduler = null) : ControllerBase
@@ -18,6 +20,10 @@ public sealed class SpotifyPlaybackController(
     /// Generuje adres autoryzacyjny Spotify OAuth 2.0 i przekierowuje do logowania konta radiowęzła.
     /// </summary>
     [HttpGet("connect")]
+    [ProducesResponseType(StatusCodes.Status302Found)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Connect(CancellationToken cancellationToken)
     {
         try
@@ -26,19 +32,21 @@ public sealed class SpotifyPlaybackController(
         }
         catch (SpotifyPlaybackException ex)
         {
-            return StatusCode(ex.StatusCode, new { Message = ex.Message });
+            return this.Create(ex.StatusCode, ex.Message);
         }
     }
 
     /// <summary>
     /// Punkt końcowy wywołania zwrotnego (OAuth Callback) po autoryzacji w serwisie Spotify.
     /// </summary>
-    /// <param name="code">Kod autoryzacyjny zwrócony przez Spotify.</param>
-    /// <param name="state">Stan weryfikacji zapobiegający atakom CSRF.</param>
-    /// <param name="error">Ewentualny kod błędu autoryzacji Spotify.</param>
-    /// <param name="cancellationToken">Token anulowania operacji.</param>
     [HttpGet("callback")]
     [AllowAnonymous]
+    [Produces("text/plain", "application/problem+json")]
+    [ProducesResponseType<string>(StatusCodes.Status200OK, "text/plain")]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status502BadGateway)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Callback(
         [FromQuery] string? code,
         [FromQuery] string? state,
@@ -53,7 +61,7 @@ public sealed class SpotifyPlaybackController(
         }
         catch (SpotifyPlaybackException ex)
         {
-            return StatusCode(ex.StatusCode, new { Message = ex.Message });
+            return this.Create(ex.StatusCode, ex.Message);
         }
     }
 
@@ -61,6 +69,9 @@ public sealed class SpotifyPlaybackController(
     /// Pobiera status połączenia ze Spotify Connect (stan autoryzacji, aktywne urządzenie audio).
     /// </summary>
     [HttpGet("status")]
+    [ProducesResponseType<SpotifyConnectionStatus>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> Status(CancellationToken cancellationToken) =>
         Ok(await spotify.GetConnectionStatusAsync(cancellationToken));
 }

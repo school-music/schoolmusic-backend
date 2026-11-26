@@ -1,5 +1,7 @@
 using LibVLCSharp.Shared;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Options;
+using schoolmusic_backend.Configuration;
 using schoolmusic_backend.Hubs;
 
 namespace schoolmusic_backend.Services
@@ -48,6 +50,9 @@ namespace schoolmusic_backend.Services
     /// </summary>
     public class AudioPlayerService : IAudioPlayerService, IDisposable
     {
+        private static readonly Lock CoreInitLock = new();
+        private static bool _coreInitialized;
+
         private readonly LibVLCSharp.Shared.LibVLC _libVLC;
         private readonly MediaPlayer _mediaPlayer;
         private readonly IHubContext<QueueHub> _hubContext;
@@ -57,23 +62,21 @@ namespace schoolmusic_backend.Services
         private string _currentSource = "None";
         private string? _currentTitle;
         private string? _currentArtist;
+        private string? _activeTempCacheFile;
 
         public event Action? MediaEnded;
 
         public AudioPlayerService(
             IHubContext<QueueHub> hubContext,
-            ILogger<AudioPlayerService> logger)
+            ILogger<AudioPlayerService> logger,
+            IOptions<AudioOptions>? audioOptions = null)
         {
             _hubContext = hubContext;
             _logger = logger;
 
-            string[] vlcOptions =
-            {
-                "--file-caching=2000",
-                "--network-caching=2000",
-                "--clock-jitter=0",
-                "--aout=directsound"
-            };
+            EnsureLibVlcInitialized();
+
+            string[] vlcOptions = BuildVlcOptions(audioOptions?.Value, OperatingSystem.IsWindows());
 
             _libVLC = new LibVLCSharp.Shared.LibVLC(enableDebugLogs: false, vlcOptions);
             _mediaPlayer = new MediaPlayer(_libVLC)
@@ -93,6 +96,7 @@ namespace schoolmusic_backend.Services
                             _currentSource = "None";
                             _currentTitle = null;
                             _currentArtist = null;
+                            CleanupTempCacheFileLocked();
                         }
                         await BroadcastPlaybackStatusAsync();
                         MediaEnded?.Invoke();
@@ -232,6 +236,7 @@ namespace schoolmusic_backend.Services
                 return ServiceResult<PlayerStatusDto>.BadRequest("Ścieżka do pliku lub adres URL nie mogą być puste.");
             }
 
+            string? newTempCacheFile = null;
             try
             {
                 Media media;
@@ -239,16 +244,16 @@ namespace schoolmusic_backend.Services
 
                 if (Uri.TryCreate(pathOrUrl, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
                 {
-                    // Bezpieczne pobranie strumienia do pliku na dysku
-                    // Rozwiązuje błędy 'cache_read stream error: cannot pre fill buffer' i demux w LibVLC na Windows
-                    string cacheFile = Path.Combine(Path.GetTempPath(), "schoolmusic_stream_cache.mp3");
+                    // Bezpieczne pobranie strumienia do unikalnego pliku tymczasowego na dysku
+                    // Rozwiązuje błędy 'cache_read stream error: cannot pre fill buffer' i demux w LibVLC
+                    newTempCacheFile = Path.Combine(Path.GetTempPath(), $"schoolmusic_stream_{Guid.NewGuid():N}.mp3");
                     using (var httpClient = new HttpClient())
                     {
                         var bytes = await httpClient.GetByteArrayAsync(uri);
-                        await File.WriteAllBytesAsync(cacheFile, bytes);
+                        await File.WriteAllBytesAsync(newTempCacheFile, bytes);
                     }
 
-                    media = new Media(_libVLC, cacheFile, FromType.FromPath);
+                    media = new Media(_libVLC, newTempCacheFile, FromType.FromPath);
                     source = "Url";
                     title ??= Path.GetFileName(uri.LocalPath);
                 }
@@ -266,6 +271,9 @@ namespace schoolmusic_backend.Services
                 lock (_lock)
                 {
                     _mediaPlayer.Stop();
+                    CleanupTempCacheFileLocked();
+                    _activeTempCacheFile = newTempCacheFile;
+                    newTempCacheFile = null;
                     _currentSource = source;
                     _currentTitle = string.IsNullOrWhiteSpace(title) ? "Nagranie radiowęzła" : title;
                     _currentArtist = string.IsNullOrWhiteSpace(artist) ? "Szkolny radiowęzeł" : artist;
@@ -281,6 +289,7 @@ namespace schoolmusic_backend.Services
             }
             catch (Exception ex)
             {
+                TryDeleteTempFile(newTempCacheFile);
                 _logger.LogError(ex, "Nie udało się uruchomić lokalnego odtwarzania.");
                 return ServiceResult<PlayerStatusDto>.BadRequest("Nie udało się uruchomić lokalnego odtwarzania.");
             }
@@ -331,6 +340,7 @@ namespace schoolmusic_backend.Services
             lock (_lock)
             {
                 _mediaPlayer.Stop();
+                CleanupTempCacheFileLocked();
                 _currentSource = "None";
                 _currentTitle = null;
                 _currentArtist = null;
@@ -366,10 +376,91 @@ namespace schoolmusic_backend.Services
         }
 
         /// <summary>
+        /// Buduje listę argumentów wiersza poleceń dla instancji LibVLC z uwzględnieniem systemu operacyjnego.
+        /// </summary>
+        public static string[] BuildVlcOptions(AudioOptions? options, bool isWindows)
+        {
+            var args = new List<string>
+            {
+                "--file-caching=2000",
+                "--network-caching=2000",
+                "--clock-jitter=0"
+            };
+
+            var output = options?.LibVlcOutput?.Trim();
+            if (!string.IsNullOrWhiteSpace(output))
+            {
+                args.Add($"--aout={output}");
+            }
+            else if (isWindows)
+            {
+                args.Add("--aout=directsound");
+            }
+
+            if (options?.ExtraVlcOptions != null)
+            {
+                foreach (var extra in options.ExtraVlcOptions)
+                {
+                    if (!string.IsNullOrWhiteSpace(extra))
+                    {
+                        args.Add(extra.Trim());
+                    }
+                }
+            }
+
+            return args.ToArray();
+        }
+
+        private static void EnsureLibVlcInitialized()
+        {
+            lock (CoreInitLock)
+            {
+                if (_coreInitialized)
+                {
+                    return;
+                }
+
+                LibVLCSharp.Shared.Core.Initialize();
+                _coreInitialized = true;
+            }
+        }
+
+        private void CleanupTempCacheFileLocked()
+        {
+            TryDeleteTempFile(_activeTempCacheFile);
+            _activeTempCacheFile = null;
+        }
+
+        private static void TryDeleteTempFile(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch
+            {
+                // Ignoruj błędy sprzątania plików tymczasowych (np. blokada podczas zamykania uchwytu).
+            }
+        }
+
+        /// <summary>
         /// Zwalnia zasoby zarządzane używane przez AudioPlayerService
         /// </summary>
         public void Dispose()
         {
+            lock (_lock)
+            {
+                _mediaPlayer?.Stop();
+                CleanupTempCacheFileLocked();
+            }
             _mediaPlayer?.Dispose();
             _libVLC?.Dispose();
         }

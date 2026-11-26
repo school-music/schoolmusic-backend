@@ -26,7 +26,10 @@ public sealed record NowPlayingDto(
     DateTime? StartedAt,
     int ElapsedSeconds,
     int RemainingSeconds,
-    bool IsPaused
+    bool IsPaused,
+    string? SpotifyId = null,
+    string Source = "other",
+    string? SongUrl = null
 );
 
 public sealed record TopTrackDto(
@@ -37,7 +40,10 @@ public sealed record TopTrackDto(
     string ArtistName,
     string? Cover,
     int DurationMs,
-    int VotesCount
+    int VotesCount,
+    string? SpotifyId = null,
+    string Source = "other",
+    string? SongUrl = null
 );
 
 
@@ -322,7 +328,10 @@ public sealed class SystemStatusService : ISystemStatusService
             StartedAt: playbackState.StartedAt,
             ElapsedSeconds: elapsedSeconds,
             RemainingSeconds: Math.Max(0, durationSeconds - elapsedSeconds),
-            IsPaused: playbackState.IsPaused
+            IsPaused: playbackState.IsPaused,
+            SpotifyId: item.Song.SpotifyId,
+            Source: item.Song.Source,
+            SongUrl: item.Song.SongUrl
         );
     }
 
@@ -353,7 +362,10 @@ public sealed class SystemStatusService : ISystemStatusService
                 ArtistName: q.Song.Artist?.Name ?? "Nieznany wykonawca",
                 Cover: q.Song.Cover,
                 DurationMs: q.Song.DurationMs,
-                VotesCount: q.Votes.Count
+                VotesCount: q.Votes.Count,
+                SpotifyId: q.Song.SpotifyId,
+                Source: q.Song.Source,
+                SongUrl: q.Song.SongUrl
             ))
             .ToList();
     }

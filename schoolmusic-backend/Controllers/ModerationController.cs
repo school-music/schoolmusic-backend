@@ -19,12 +19,15 @@ namespace schoolmusic_backend.Controllers
     [Route("/api/[controller]")]
     [ApiController]
     [Authorize(Roles ="mod,admin,head_admin")]
+    [Produces("application/json")]
     public class ModerationController : Controller
     {
         private readonly schoolmusicContext _context;
         private readonly IConnectionMultiplexer _redis;
         private readonly IHubContext<QueueHub> _hubContext;
         private readonly IQueueMutationLock _mutationLock;
+        private readonly ISessionTokenService? _sessionTokenService;
+        private readonly IAuthSecurityStampService? _securityStampService;
         private readonly ILogger<ModerationController>? _logger;
         private readonly TimeProvider _timeProvider;
         private static readonly IQueueMutationLock DefaultMutationLock = new QueueMutationLock();
@@ -35,7 +38,9 @@ namespace schoolmusic_backend.Controllers
             IHubContext<QueueHub> hubContext,
             IQueueMutationLock? mutationLock = null,
             ILogger<ModerationController>? logger = null,
-            TimeProvider? timeProvider = null)
+            TimeProvider? timeProvider = null,
+            ISessionTokenService? sessionTokenService = null,
+            IAuthSecurityStampService? securityStampService = null)
         {
             _context = context;
             _redis = redis;
@@ -43,6 +48,8 @@ namespace schoolmusic_backend.Controllers
             _mutationLock = mutationLock ?? DefaultMutationLock;
             _logger = logger;
             _timeProvider = timeProvider ?? TimeProvider.System;
+            _sessionTokenService = sessionTokenService;
+            _securityStampService = securityStampService;
         }
         /// <summary>
         /// Reprezentuje propozycję utworu przesłaną przez użytkownika.
@@ -122,7 +129,49 @@ namespace schoolmusic_backend.Controllers
 
         public record AddSongToBlacklistDto(int? SongId, int? ArtistId);
         public record AddSongToGreenlistDto(int SongId);
+        public sealed record PendingProposalsResponseDto(
+            string Message,
+            List<SongProposalDto> Songs,
+            List<SongProposalDto> Proposals
+        );
+        public sealed record ApproveProposalResponseDto(
+            string Message,
+            int QueueItemId,
+            string? SongTitle,
+            int BreakId
+        );
+        public sealed record DenyProposalResponseDto(
+            string Message,
+            string ProposalId,
+            string? SongTitle,
+            bool AddedToBlacklist
+        );
+        public sealed record BannedUserItemDto(
+            int Id,
+            int UserId,
+            string? Username,
+            string? Reason,
+            DateTime BannedAt
+        );
+        public sealed record BannedUsersListResponseDto(
+            string Message,
+            List<BannedUserItemDto> BannedUsers
+        );
+        public sealed record ModerationMessageResponseDto(string Message);
+        public sealed record BlacklistMutationResponseDto(
+            string Message,
+            int BlacklistId,
+            int? SongId = null,
+            int? ArtistId = null,
+            bool? RemovedFromGreenlist = null
+        );
+        public sealed record GreenlistMutationResponseDto(
+            string Message,
+            int GreenlistId,
+            int SongId
+        );
         private sealed record ApprovedProposalResult(QueueItem QueueItem, Song Song);
+        private sealed record PendingProposalMatch(SongProposalDto Proposal, RedisValue RawValue);
 
         private static readonly JsonSerializerOptions _jsonOptions = new()
         {
@@ -135,6 +184,9 @@ namespace schoolmusic_backend.Controllers
         /// Dostęp tylko dla administratorów
         /// </summary>
         [HttpGet("pending")]
+        [ProducesResponseType<PendingProposalsResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> GetAllPendingSongs()
         {
             var db = _redis.GetDatabase();
@@ -161,14 +213,35 @@ namespace schoolmusic_backend.Controllers
                 }
             }
 
-            return Ok(new
-            {
-                Message = "Wszystkie propozycje piosenek oczekujące na zatwierdzenie",
-                Songs = proposals,
-                Proposals = proposals
-            });
+            return Ok(new PendingProposalsResponseDto(
+                Message: "Wszystkie propozycje piosenek oczekujące na zatwierdzenie",
+                Songs: proposals,
+                Proposals: proposals
+            ));
         }
 
+        private async Task<PendingProposalMatch?> FindPendingProposalAsync(IDatabase db, string proposalId)
+        {
+            RedisValue[] pendingSongs = await db.ListRangeAsync(PendingProposalStore.ListKey);
+            foreach (var rv in pendingSongs)
+            {
+                if (!rv.HasValue) continue;
+                try
+                {
+                    var dto = JsonSerializer.Deserialize<SongProposalDto>(rv.ToString(), _jsonOptions);
+                    if (dto != null && string.Equals(dto.Id, proposalId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return new PendingProposalMatch(dto, rv);
+                    }
+                }
+                catch (Exception ex) when (ex is JsonException or NotSupportedException)
+                {
+                    _logger?.LogWarning("Pominięto nieprawidłowy wpis w kolejce moderacji Redis.");
+                }
+            }
+
+            return null;
+        }
 
         /// <summary>
         /// Zatwierdza propozycję piosenki o podanym identyfikatorze, dodaje ją do zielonej listy i kolejki oraz
@@ -178,112 +251,64 @@ namespace schoolmusic_backend.Controllers
         /// propozycji lub powiązanej piosenki; 200 Ok zawierające informacje o zatwierdzeniu, identyfikatorze elementu
         /// kolejki i identyfikatorze przerwy</returns>
         [HttpPost("approve/{proposalId}")]
+        [ProducesResponseType<ApproveProposalResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
         public async Task<IActionResult> ApproveSong(string proposalId)
         {
-            var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
-                           ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
-            if (!int.TryParse(userIdClaim, out int modUserId))
+            var modUserId = HttpContext.GetCurrentUserId();
+            if (modUserId == null)
             {
-                return Unauthorized(new { Message = "Brak autoryzacji moderatora." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Brak autoryzacji moderatora.");
             }
 
             var db = _redis.GetDatabase();
             string pendingKey = PendingProposalStore.ListKey;
-            RedisValue[] pendingSongs = await db.ListRangeAsync(pendingKey);
-
-            SongProposalDto? matchingProposal = null;
-            RedisValue matchingRedisValue = RedisValue.Null;
-
-            foreach (var rv in pendingSongs)
+            var match = await FindPendingProposalAsync(db, proposalId);
+            if (match == null)
             {
-                if (rv.HasValue)
-                {
-                    try
-                    {
-                        var dto = JsonSerializer.Deserialize<SongProposalDto>(rv.ToString(), _jsonOptions);
-                        if (dto != null && string.Equals(dto.Id, proposalId, StringComparison.OrdinalIgnoreCase))
-                        {
-                            matchingProposal = dto;
-                            matchingRedisValue = rv;
-                            break;
-                        }
-                    }
-                    catch (Exception ex) when (ex is JsonException or NotSupportedException)
-                    {
-                        _logger?.LogWarning("Pominięto nieprawidłowy wpis w kolejce moderacji Redis.");
-                    }
-                }
+                return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono propozycji o podanym identyfikatorze.");
             }
 
-            if (matchingProposal == null)
-            {
-                return NotFound(new { Message = "Nie znaleziono propozycji o podanym identyfikatorze." });
-            }
-
+            var matchingProposal = match.Proposal;
             await using var mutationLock = await _mutationLock.AcquireAsync(matchingProposal.BreakId);
-            var stillPending = (await db.ListRangeAsync(pendingKey)).Any(value => value == matchingRedisValue);
+            var stillPending = (await db.ListRangeAsync(pendingKey)).Any(value => value == match.RawValue);
             if (!stillPending)
-                return NotFound(new { Message = "Propozycja została już obsłużona przez innego moderatora." });
+            {
+                return this.Create(StatusCodes.Status404NotFound, "Propozycja została już obsłużona przez innego moderatora.");
+            }
 
-            var approval = await ApproveProposalInDatabaseAsync(matchingProposal, modUserId);
+            var approval = await ApproveProposalInDatabaseAsync(matchingProposal, modUserId.Value);
             if (!approval.Success || approval.Data == null)
-                return StatusCode(approval.StatusCode, new { Message = approval.Message });
+            {
+                return this.Create(approval.StatusCode, approval.Message ?? "Nie udało się zatwierdzić propozycji.");
+            }
 
             var queueItem = approval.Data.QueueItem;
             var song = approval.Data.Song;
             int breakId = matchingProposal.BreakId;
 
-            await db.ListRemoveAsync(pendingKey, matchingRedisValue, 1);
+            await db.ListRemoveAsync(pendingKey, match.RawValue, 1);
             await db.KeyDeleteAsync(PendingProposalStore.GetDeduplicationKey(breakId, song.Id));
             _logger?.LogInformation(
                 "Moderator {ModeratorUserId} zatwierdził propozycję {ProposalId} jako pozycję {QueueItemId} przerwy {BreakId}.",
-                modUserId,
+                modUserId.Value,
                 proposalId,
                 queueItem.Id,
                 breakId);
 
             // Powiadamiamy wszystkich podłączonych do tej przerwy o nowej zatwierdzonej piosence
-            // poprzez SignalR i aktualizujemy kolejkę w czasie rzeczywistym
-            var items = await _context.QueueItems
-                .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
-                .Include(q => q.Song)
-                    .ThenInclude(s => s.Artist)
-                .Include(q => q.User)
-                .Include(q => q.Votes)
-                .ToListAsync();
+            // poprzez SignalR i aktualizujemy kolejkę w czasie rzeczywistym z pełnymi metadanymi.
+            await QueueService.BroadcastQueueAsync(_context, _hubContext, breakId);
 
-            var ranking = items
-                .OrderByDescending(q => q.Votes.Count)
-                .ThenBy(q => q.OrderIndex)
-                .Select((q, index) => new
-                {
-                    position = index + 1,
-                    queueItemId = q.Id,
-                    songId = q.SongId,
-                    title = q.Song.Title,
-                    artistName = q.Song.Artist?.Name ?? "Nieznany wykonawca",
-                    cover = q.Song.Cover,
-                    durationMs = q.Song.DurationMs,
-                    votesCount = q.Votes.Count,
-                    submittedBy = q.User?.UserLogin ?? "Uczeń",
-                    orderIndex = q.OrderIndex
-                })
-                .ToList();
-
-            await _hubContext.Clients.Group($"Break_{breakId}").SendAsync("QueueUpdated", new
-            {
-                breakId,
-                totalSongs = ranking.Count,
-                queue = ranking
-            });
-
-            return Ok(new
-            {
-                Message = "Piosenka została zatwierdzona, dodana do kolejki oraz wpisana na zieloną listę.",
-                queueItemId = queueItem.Id,
-                songTitle = song.Title,
-                breakId = breakId
-            });
+            return Ok(new ApproveProposalResponseDto(
+                Message: "Piosenka została zatwierdzona, dodana do kolejki oraz wpisana na zieloną listę.",
+                QueueItemId: queueItem.Id,
+                SongTitle: song.Title,
+                BreakId: breakId
+            ));
         }
 
         /// <summary>
@@ -293,83 +318,50 @@ namespace schoolmusic_backend.Controllers
         /// tytuł utworu oraz flagę wskazującą, czy utwór został dodany do czarnej listy.</returns>
         [HttpPost("deny/{proposalId}")]
         [HttpPost("reject/{proposalId}")]
+        [ProducesResponseType<DenyProposalResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> DenySong(string proposalId, [FromQuery] bool addToBlacklist = false)
         {
-            var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
-                           ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
-            if (!int.TryParse(userIdClaim, out int modUserId))
+            var modUserId = HttpContext.GetCurrentUserId();
+            if (modUserId == null)
             {
-                return Unauthorized(new { Message = "Brak autoryzacji moderatora." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Brak autoryzacji moderatora.");
             }
 
             var db = _redis.GetDatabase();
             string pendingKey = PendingProposalStore.ListKey;
-            RedisValue[] pendingSongs = await db.ListRangeAsync(pendingKey);
-
-            SongProposalDto? matchingProposal = null;
-            RedisValue matchingRedisValue = RedisValue.Null;
-
-            foreach (var rv in pendingSongs)
+            var match = await FindPendingProposalAsync(db, proposalId);
+            if (match == null)
             {
-                if (rv.HasValue)
-                {
-                    try
-                    {
-                        var dto = JsonSerializer.Deserialize<SongProposalDto>(rv.ToString(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                        if (dto != null && string.Equals(dto.Id, proposalId, StringComparison.OrdinalIgnoreCase))
-                        {
-                            matchingProposal = dto;
-                            matchingRedisValue = rv;
-                            break;
-                        }
-                    }
-                    catch (Exception ex) when (ex is JsonException or NotSupportedException)
-                    {
-                        _logger?.LogWarning("Pominięto nieprawidłowy wpis w kolejce moderacji Redis.");
-                    }
-                }
+                return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono propozycji o podanym identyfikatorze.");
             }
 
-            if (matchingProposal == null)
-            {
-                return NotFound(new { Message = "Nie znaleziono propozycji o podanym identyfikatorze." });
-            }
-
+            var matchingProposal = match.Proposal;
             await using var mutationLock = await _mutationLock.AcquireAsync(matchingProposal.BreakId);
-            var stillPending = (await db.ListRangeAsync(pendingKey)).Any(value => value == matchingRedisValue);
+            var stillPending = (await db.ListRangeAsync(pendingKey)).Any(value => value == match.RawValue);
             if (!stillPending)
-                return NotFound(new { Message = "Propozycja została już obsłużona przez innego moderatora." });
+            {
+                return this.Create(StatusCodes.Status404NotFound, "Propozycja została już obsłużona przez innego moderatora.");
+            }
 
-            await db.ListRemoveAsync(pendingKey, matchingRedisValue, 1);
+            await db.ListRemoveAsync(pendingKey, match.RawValue, 1);
             await db.KeyDeleteAsync(PendingProposalStore.GetDeduplicationKey(
                 matchingProposal.BreakId,
                 matchingProposal.SongId));
             _logger?.LogInformation(
                 "Moderator {ModeratorUserId} odrzucił propozycję {ProposalId} dla przerwy {BreakId}.",
-                modUserId,
+                modUserId.Value,
                 proposalId,
                 matchingProposal.BreakId);
 
             bool blacklisted = false;
             if (addToBlacklist)
             {
-                var moderator = await _context.Moderators.FirstOrDefaultAsync(m => m.UserId == modUserId);
-                if (moderator == null)
-                {
-                    moderator = new Moderator
-                    {
-                        UserId = modUserId,
-                        SongsApproved = 0,
-                        SongsBanned = 0,
-                        ArtistsBanned = 0
-                    };
-                    _context.Moderators.Add(moderator);
-                    await _context.SaveChangesAsync();
-                }
-
-                int songId = matchingProposal.SongId;
-                var song = await _context.Songs.FindAsync(songId);
-                if (song != null)
+                var moderator = await GetOrCreateModeratorAsync(modUserId.Value);
+                var song = moderator == null ? null : await _context.Songs.FindAsync(matchingProposal.SongId);
+                if (moderator != null && song != null)
                 {
                     bool isAlreadyBlacklisted = await _context.SongBlacklists.AnyAsync(sb => sb.SongId == song.Id);
                     if (!isAlreadyBlacklisted)
@@ -387,15 +379,14 @@ namespace schoolmusic_backend.Controllers
                 }
             }
 
-            return Ok(new
-            {
-                Message = blacklisted
+            return Ok(new DenyProposalResponseDto(
+                Message: blacklisted
                     ? "Propozycja została odrzucona i dodana do czarnej listy."
                     : "Propozycja została odrzucona i usunięta z kolejki oczekujących.",
-                proposalId = proposalId,
-                songTitle = matchingProposal.Title,
-                addedToBlacklist = blacklisted
-            });
+                ProposalId: proposalId,
+                SongTitle: matchingProposal.Title,
+                AddedToBlacklist: blacklisted
+            ));
         }
 
         /// <summary>
@@ -404,25 +395,26 @@ namespace schoolmusic_backend.Controllers
         /// <returns>Zwraca IActionResult z odpowiednią wiadomością oraz 
         /// listą zbanowanych użytkowników </returns>
         [HttpGet("banned")]
+        [ProducesResponseType<BannedUsersListResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> GetAllBannedUsers()
         {
             var bannedUsers = await _context.BannedUsers
                 .Include(u => u.User)
-                .Select(u => new
-                {
+                .Select(u => new BannedUserItemDto(
                     u.Id,
                     u.UserId,
-                    Username = u.User.UserLogin,
+                    u.User != null ? u.User.UserLogin : null,
                     u.Reason,
                     u.BannedAt
-                })
+                ))
                 .ToListAsync();
 
-            return Ok(new
-            {
-                Message = "Wszyscy zbanowani użytkownicy",
-                BannedUsers = bannedUsers
-            });
+            return Ok(new BannedUsersListResponseDto(
+                Message: "Wszyscy zbanowani użytkownicy",
+                BannedUsers: bannedUsers
+            ));
         }
 
         /// <summary>
@@ -431,6 +423,10 @@ namespace schoolmusic_backend.Controllers
         /// <returns>IActionResult: 200 OK gdy ban został dodany; 409 Conflict gdy użytkownik już jest zbanowany; 401
         /// Unauthorized gdy brak prawidłowego identyfikatora moderatora</returns>
         [HttpPost("ban/{userId:int}")]
+        [ProducesResponseType<ModerationMessageResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
         public async Task<IActionResult> BanUser(int userId)
         {
             bool isBanned = await _context.BannedUsers
@@ -438,10 +434,7 @@ namespace schoolmusic_backend.Controllers
             var modId = HttpContext.GetCurrentUserId();
             if(modId == null)
             {
-                return Unauthorized(new
-                {
-                    Message = "Nieprawidłowy lub brakujący identyfikator"
-                });
+                return this.Create(StatusCodes.Status401Unauthorized, "Nieprawidłowy lub brakujący identyfikator");
             }
             if(!isBanned)
             {
@@ -449,19 +442,32 @@ namespace schoolmusic_backend.Controllers
                 {
                     UserId = userId,
                     ModeratorId = modId.Value,
-                    BannedAt = DateTime.UtcNow
-
+                    BannedAt = _timeProvider.GetUtcNow().UtcDateTime
                 });
                 await _context.SaveChangesAsync();
-                return Ok(new
+
+                var targetUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId);
+                if (targetUser != null)
                 {
-                    Message = $"Poprawnie zbanowano użytkownka o id {userId}",
-                });
+                    if (_sessionTokenService != null)
+                    {
+                        await _sessionTokenService.RevokeAllUserSessionsAsync(targetUser);
+                    }
+                    else
+                    {
+                        targetUser.TokenVersion += 1;
+                        await _context.SaveChangesAsync();
+                    }
+                }
+
+                if (_securityStampService != null)
+                {
+                    await _securityStampService.InvalidateUserAsync(userId);
+                }
+
+                return Ok(new ModerationMessageResponseDto($"Poprawnie zbanowano użytkownka o id {userId}"));
             }
-            return Conflict(new
-            {
-                Message = "Ten użytkownik został już zbanowany"
-            });
+            return this.Create(StatusCodes.Status409Conflict, "Ten użytkownik został już zbanowany");
         }
 
         /// <summary>
@@ -470,6 +476,10 @@ namespace schoolmusic_backend.Controllers
         /// <returns>IActionResult zwracający 200 (Ok) z komunikatem po pomyślnym odbanowaniu; 400 (BadRequest) gdy użytkownik
         /// nie jest zbanowany; 401 (Unauthorized) gdy brak lub nieprawidłowy identyfikator moderatora</returns>
         [HttpPost("unaban/{banId:int}")]
+        [ProducesResponseType<ModerationMessageResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> UnbanUser(int banId)
         {
             var bannedUser = await _context.BannedUsers
@@ -477,24 +487,22 @@ namespace schoolmusic_backend.Controllers
             var modId = HttpContext.GetCurrentUserId();
             if(modId == null)
             {
-                return Unauthorized(new
-                {
-                    Message = "Nieprawidłowy lub brakujący identyfikator"
-                });
+                return this.Create(StatusCodes.Status401Unauthorized, "Nieprawidłowy lub brakujący identyfikator");
             }
             if (bannedUser != null)
             {
+                var unbannedUserId = bannedUser.UserId;
                 _context.BannedUsers.Remove(bannedUser);
                 await _context.SaveChangesAsync();
-                return Ok(new
+
+                if (_securityStampService != null)
                 {
-                    Message = "Pomyślnie odbanowano użytkownika"
-                });
+                    await _securityStampService.InvalidateUserAsync(unbannedUserId);
+                }
+
+                return Ok(new ModerationMessageResponseDto("Pomyślnie odbanowano użytkownika"));
             }
-            return BadRequest(new
-            {
-                Message = "Podany użytkownik nie jest zbanowany"
-            });
+            return this.Create(StatusCodes.Status400BadRequest, "Podany użytkownik nie jest zbanowany");
         }
 
         private async Task<Moderator?> GetOrCreateModeratorAsync(int userId)
@@ -519,6 +527,9 @@ namespace schoolmusic_backend.Controllers
         /// Zwraca stronicowaną listę utworów znajdujących się na czarnej liście z opcjonalnym wyszukiwaniem po tytule lub wykonawcy.
         /// </summary>
         [HttpGet("blacklist")]
+        [ProducesResponseType<BlacklistPagedResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> GetBlacklistedSongs(
             [FromQuery] string? search = null,
             [FromQuery] int page = 1,
@@ -575,18 +586,24 @@ namespace schoolmusic_backend.Controllers
         /// Dodaje utwór lub wykonawcę do czarnej listy. W przypadku dodania utworu, jest on automatycznie usuwany z zielonej listy.
         /// </summary>
         [HttpPost("blacklist")]
+        [ProducesResponseType<BlacklistMutationResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
         public async Task<IActionResult> AddToBlacklist([FromBody] AddSongToBlacklistDto dto)
         {
             var modUserId = HttpContext.GetCurrentUserId();
             if (modUserId == null)
             {
-                return Unauthorized(new { Message = "Brak autoryzacji moderatora." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Brak autoryzacji moderatora.");
             }
 
             var moderator = await GetOrCreateModeratorAsync(modUserId.Value);
             if (moderator == null)
             {
-                return Unauthorized(new { Message = "Nie znaleziono profilu moderatora." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Nie znaleziono profilu moderatora.");
             }
 
             if (dto.SongId.HasValue)
@@ -595,13 +612,13 @@ namespace schoolmusic_backend.Controllers
                 var song = await _context.Songs.Include(s => s.Artist).FirstOrDefaultAsync(s => s.Id == songId);
                 if (song == null)
                 {
-                    return NotFound(new { Message = "Utwór o podanym ID nie istnieje." });
+                    return this.Create(StatusCodes.Status404NotFound, "Utwór o podanym ID nie istnieje.");
                 }
 
                 bool alreadyBlacklisted = await _context.SongBlacklists.AnyAsync(b => b.SongId == song.Id);
                 if (alreadyBlacklisted)
                 {
-                    return Conflict(new { Message = "Ten utwór znajduje się już na czarnej liście." });
+                    return this.Create(StatusCodes.Status409Conflict, "Ten utwór znajduje się już na czarnej liście.");
                 }
 
                 var greenlistEntry = await _context.SongGreenlists.FirstOrDefaultAsync(g => g.SongId == song.Id);
@@ -620,13 +637,12 @@ namespace schoolmusic_backend.Controllers
                 moderator.SongsBanned += 1;
                 await _context.SaveChangesAsync();
 
-                return Ok(new
-                {
-                    Message = $"Pomyślnie dodano utwór '{song.Title}' do czarnej listy.",
-                    BlacklistId = blacklistEntry.Id,
-                    SongId = song.Id,
-                    RemovedFromGreenlist = greenlistEntry != null
-                });
+                return Ok(new BlacklistMutationResponseDto(
+                    Message: $"Pomyślnie dodano utwór '{song.Title}' do czarnej listy.",
+                    BlacklistId: blacklistEntry.Id,
+                    SongId: song.Id,
+                    RemovedFromGreenlist: greenlistEntry != null
+                ));
             }
 
             if (dto.ArtistId.HasValue)
@@ -635,13 +651,13 @@ namespace schoolmusic_backend.Controllers
                 var artist = await _context.Artists.FindAsync(artistId);
                 if (artist == null)
                 {
-                    return NotFound(new { Message = "Wykonawca o podanym ID nie istnieje." });
+                    return this.Create(StatusCodes.Status404NotFound, "Wykonawca o podanym ID nie istnieje.");
                 }
 
                 bool alreadyBlacklisted = await _context.ArtistBlacklists.AnyAsync(a => a.ArtistId == artistId);
                 if (alreadyBlacklisted)
                 {
-                    return Conflict(new { Message = "Ten wykonawca znajduje się już na czarnej liście." });
+                    return this.Create(StatusCodes.Status409Conflict, "Ten wykonawca znajduje się już na czarnej liście.");
                 }
 
                 var artistEntry = new ArtistBlacklist
@@ -653,21 +669,24 @@ namespace schoolmusic_backend.Controllers
                 moderator.ArtistsBanned += 1;
                 await _context.SaveChangesAsync();
 
-                return Ok(new
-                {
-                    Message = $"Pomyślnie dodano wykonawcę '{artist.Name}' do czarnej listy.",
-                    BlacklistId = artistEntry.Id,
-                    ArtistId = artistId
-                });
+                return Ok(new BlacklistMutationResponseDto(
+                    Message: $"Pomyślnie dodano wykonawcę '{artist.Name}' do czarnej listy.",
+                    BlacklistId: artistEntry.Id,
+                    ArtistId: artistId
+                ));
             }
 
-            return BadRequest(new { Message = "Musisz podać SongId lub ArtistId." });
+            return this.Create(StatusCodes.Status400BadRequest, "Musisz podać SongId lub ArtistId.");
         }
 
         /// <summary>
         /// Usuwa utwór z czarnej listy po identyfikatorze wpisu lub identyfikatorze utworu.
         /// </summary>
         [HttpDelete("blacklist/{id:int}")]
+        [ProducesResponseType<BlacklistMutationResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> RemoveFromBlacklist(int id)
         {
             var entry = await _context.SongBlacklists
@@ -676,24 +695,26 @@ namespace schoolmusic_backend.Controllers
 
             if (entry == null)
             {
-                return NotFound(new { Message = "Wpis na czarnej liście o podanym identyfikatorze nie został znaleziony." });
+                return this.Create(StatusCodes.Status404NotFound, "Wpis na czarnej liście o podanym identyfikatorze nie został znaleziony.");
             }
 
             _context.SongBlacklists.Remove(entry);
             await _context.SaveChangesAsync();
 
-            return Ok(new
-            {
-                Message = $"Pomyślnie usunięto utwór '{entry.Song?.Title ?? id.ToString()}' z czarnej listy.",
-                BlacklistId = entry.Id,
-                SongId = entry.SongId
-            });
+            return Ok(new BlacklistMutationResponseDto(
+                Message: $"Pomyślnie usunięto utwór '{entry.Song?.Title ?? id.ToString()}' z czarnej listy.",
+                BlacklistId: entry.Id,
+                SongId: entry.SongId
+            ));
         }
 
         /// <summary>
         /// Zwraca stronicowaną listę zablokowanych wykonawców (ArtistBlacklist).
         /// </summary>
         [HttpGet("blacklist/artists")]
+        [ProducesResponseType<BlacklistedArtistsPagedResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> GetBlacklistedArtists(
             [FromQuery] string? search = null,
             [FromQuery] int page = 1,
@@ -744,30 +765,35 @@ namespace schoolmusic_backend.Controllers
         /// Dodaje wykonawcę o podanym ID do czarnej listy wykonawców.
         /// </summary>
         [HttpPost("blacklist/artist/{artistId:int}")]
+        [ProducesResponseType<BlacklistMutationResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
         public async Task<IActionResult> AddArtistToBlacklist(int artistId)
         {
             var modUserId = HttpContext.GetCurrentUserId();
             if (modUserId == null)
             {
-                return Unauthorized(new { Message = "Brak autoryzacji moderatora." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Brak autoryzacji moderatora.");
             }
 
             var artist = await _context.Artists.FindAsync(artistId);
             if (artist == null)
             {
-                return NotFound(new { Message = "Wykonawca o podanym ID nie istnieje." });
+                return this.Create(StatusCodes.Status404NotFound, "Wykonawca o podanym ID nie istnieje.");
             }
 
             bool already = await _context.ArtistBlacklists.AnyAsync(a => a.ArtistId == artistId);
             if (already)
             {
-                return Conflict(new { Message = "Ten wykonawca znajduje się już na czarnej liście." });
+                return this.Create(StatusCodes.Status409Conflict, "Ten wykonawca znajduje się już na czarnej liście.");
             }
 
             var moderator = await GetOrCreateModeratorAsync(modUserId.Value);
             if (moderator == null)
             {
-                return Unauthorized(new { Message = "Nie znaleziono profilu moderatora." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Nie znaleziono profilu moderatora.");
             }
 
             var entry = new ArtistBlacklist
@@ -779,18 +805,21 @@ namespace schoolmusic_backend.Controllers
             moderator.ArtistsBanned += 1;
             await _context.SaveChangesAsync();
 
-            return Ok(new
-            {
-                Message = $"Pomyślnie dodano wykonawcę '{artist.Name}' do czarnej listy.",
-                BlacklistId = entry.Id,
-                ArtistId = artistId
-            });
+            return Ok(new BlacklistMutationResponseDto(
+                Message: $"Pomyślnie dodano wykonawcę '{artist.Name}' do czarnej listy.",
+                BlacklistId: entry.Id,
+                ArtistId: artistId
+            ));
         }
 
         /// <summary>
         /// Usuwa wykonawcę z czarnej listy po identyfikatorze wykonawcy lub identyfikatorze wpisu.
         /// </summary>
         [HttpDelete("blacklist/artist/{artistId:int}")]
+        [ProducesResponseType<BlacklistMutationResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> RemoveArtistFromBlacklist(int artistId)
         {
             var entry = await _context.ArtistBlacklists
@@ -799,24 +828,26 @@ namespace schoolmusic_backend.Controllers
 
             if (entry == null)
             {
-                return NotFound(new { Message = "Wykonawca o podanym ID nie znajduje się na czarnej liście." });
+                return this.Create(StatusCodes.Status404NotFound, "Wykonawca o podanym ID nie znajduje się na czarnej liście.");
             }
 
             _context.ArtistBlacklists.Remove(entry);
             await _context.SaveChangesAsync();
 
-            return Ok(new
-            {
-                Message = $"Pomyślnie usunięto wykonawcę '{entry.Artist?.Name ?? artistId.ToString()}' z czarnej listy.",
-                BlacklistId = entry.Id,
-                ArtistId = entry.ArtistId
-            });
+            return Ok(new BlacklistMutationResponseDto(
+                Message: $"Pomyślnie usunięto wykonawcę '{entry.Artist?.Name ?? artistId.ToString()}' z czarnej listy.",
+                BlacklistId: entry.Id,
+                ArtistId: entry.ArtistId
+            ));
         }
 
         /// <summary>
         /// Zwraca stronicowaną listę utworów zatwierdzonych (zielona lista) z opcjonalnym wyszukiwaniem po tytule lub wykonawcy.
         /// </summary>
         [HttpGet("greenlist")]
+        [ProducesResponseType<GreenlistPagedResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> GetGreenlistedSongs(
             [FromQuery] string? search = null,
             [FromQuery] int page = 1,
@@ -873,36 +904,42 @@ namespace schoolmusic_backend.Controllers
         /// Bezpośrednio dodaje utwór do zielonej listy (wstępne zatwierdzenie przez moderatora/administratora).
         /// </summary>
         [HttpPost("greenlist")]
+        [ProducesResponseType<GreenlistMutationResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
         public async Task<IActionResult> AddSongToGreenlist([FromBody] AddSongToGreenlistDto dto)
         {
             var modUserId = HttpContext.GetCurrentUserId();
             if (modUserId == null)
             {
-                return Unauthorized(new { Message = "Brak autoryzacji moderatora." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Brak autoryzacji moderatora.");
             }
 
             var song = await _context.Songs.Include(s => s.Artist).FirstOrDefaultAsync(s => s.Id == dto.SongId);
             if (song == null)
             {
-                return NotFound(new { Message = "Utwór o podanym ID nie istnieje." });
+                return this.Create(StatusCodes.Status404NotFound, "Utwór o podanym ID nie istnieje.");
             }
 
             bool isBlacklisted = await _context.SongBlacklists.AnyAsync(b => b.SongId == song.Id);
             if (isBlacklisted)
             {
-                return BadRequest(new { Message = "Nie można dodać utworu do zielonej listy, ponieważ znajduje się na czarnej liście." });
+                return this.Create(StatusCodes.Status400BadRequest, "Nie można dodać utworu do zielonej listy, ponieważ znajduje się na czarnej liście.");
             }
 
             bool alreadyGreenlisted = await _context.SongGreenlists.AnyAsync(g => g.SongId == song.Id);
             if (alreadyGreenlisted)
             {
-                return Conflict(new { Message = "Ten utwór znajduje się już na zielonej liście." });
+                return this.Create(StatusCodes.Status409Conflict, "Ten utwór znajduje się już na zielonej liście.");
             }
 
             var moderator = await GetOrCreateModeratorAsync(modUserId.Value);
             if (moderator == null)
             {
-                return Unauthorized(new { Message = "Nie znaleziono profilu moderatora." });
+                return this.Create(StatusCodes.Status401Unauthorized, "Nie znaleziono profilu moderatora.");
             }
 
             var entry = new SongGreenlist
@@ -915,18 +952,21 @@ namespace schoolmusic_backend.Controllers
             moderator.SongsApproved += 1;
             await _context.SaveChangesAsync();
 
-            return Ok(new
-            {
-                Message = $"Pomyślnie dodano utwór '{song.Title}' do zielonej listy.",
-                GreenlistId = entry.Id,
-                SongId = song.Id
-            });
+            return Ok(new GreenlistMutationResponseDto(
+                Message: $"Pomyślnie dodano utwór '{song.Title}' do zielonej listy.",
+                GreenlistId: entry.Id,
+                SongId: song.Id
+            ));
         }
 
         /// <summary>
         /// Usuwa utwór z zielonej listy po identyfikatorze utworu lub identyfikatorze wpisu.
         /// </summary>
         [HttpDelete("greenlist/{songId:int}")]
+        [ProducesResponseType<GreenlistMutationResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> RemoveFromGreenlist(int songId)
         {
             var entry = await _context.SongGreenlists
@@ -935,18 +975,17 @@ namespace schoolmusic_backend.Controllers
 
             if (entry == null)
             {
-                return NotFound(new { Message = "Utwór o podanym identyfikatorze nie znajduje się na zielonej liście." });
+                return this.Create(StatusCodes.Status404NotFound, "Utwór o podanym identyfikatorze nie znajduje się na zielonej liście.");
             }
 
             _context.SongGreenlists.Remove(entry);
             await _context.SaveChangesAsync();
 
-            return Ok(new
-            {
-                Message = $"Pomyślnie usunięto utwór '{entry.Song?.Title ?? songId.ToString()}' z zielonej listy.",
-                GreenlistId = entry.Id,
-                SongId = entry.SongId
-            });
+            return Ok(new GreenlistMutationResponseDto(
+                Message: $"Pomyślnie usunięto utwór '{entry.Song?.Title ?? songId.ToString()}' z zielonej listy.",
+                GreenlistId: entry.Id,
+                SongId: entry.SongId
+            ));
         }
 
         private async Task<ServiceResult<ApprovedProposalResult>> ApproveProposalInDatabaseAsync(

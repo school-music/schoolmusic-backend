@@ -1,11 +1,10 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
+using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Hubs;
 using schoolmusic_backend.Models;
-using schoolmusic_backend.Extensions;
 using StackExchange.Redis;
-using System.Text.Json;
 
 namespace schoolmusic_backend.Services
 {
@@ -26,6 +25,123 @@ namespace schoolmusic_backend.Services
     /// Reprezentuje żądanie oddania głosu dla elementu kolejki, opcjonalnie powiązane z utworem lub przerwą
     /// </summary>
     public record VoteRequestDto(int? QueueItemId, int? SongId = null, int? BreakId = null);
+
+    public sealed record ProposedSongMetadataDto(
+        int SongId,
+        string Title,
+        string Artist,
+        string ArtistName,
+        int ArtistId,
+        string? Cover,
+        int DurationMs,
+        string? Genre,
+        string Source,
+        string? SongUrl,
+        string? SpotifyId
+    );
+
+    public sealed record ProposeSongApprovedDto(
+        string Status,
+        string Message,
+        int QueueItemId,
+        int BreakId,
+        int BreakNumber,
+        ProposedSongMetadataDto Song,
+        int VotesCount
+    );
+
+    public sealed record ProposeSongPendingDto(
+        string Status,
+        string Message,
+        string ProposalId,
+        int BreakId,
+        int BreakNumber,
+        ProposedSongMetadataDto Song
+    );
+
+    public sealed record QueueTrackItemDto(
+        int Position,
+        int QueueItemId,
+        int SongId,
+        string Title,
+        int ArtistId,
+        string ArtistName,
+        string? Cover,
+        int DurationMs,
+        string? Genre,
+        string Source,
+        string? SongUrl,
+        string? SpotifyId,
+        string Status,
+        string? ModerationStatus,
+        int VotesCount,
+        bool HasVoted,
+        string SubmittedBy,
+        int OrderIndex
+    );
+
+    public sealed record QueueBroadcastItemDto(
+        int Position,
+        int QueueItemId,
+        int SongId,
+        string Title,
+        int ArtistId,
+        string ArtistName,
+        string? Cover,
+        int DurationMs,
+        string? Genre,
+        string Source,
+        string? SongUrl,
+        string? SpotifyId,
+        string Status,
+        string? ModerationStatus,
+        int VotesCount,
+        string SubmittedBy,
+        int OrderIndex
+    );
+
+    public sealed record QueueForBreakResponseDto(
+        int BreakId,
+        int BreakNumber,
+        DateOnly BreakDate,
+        DateTimeOffset StartsAt,
+        DateTimeOffset EndsAt,
+        DateTimeOffset CutoffAt,
+        string TimeZone,
+        bool IsVotingOpen,
+        string VotingStatus,
+        string VotingReasonCode,
+        string VotingReason,
+        int TotalSongs,
+        IReadOnlyList<int> UserVotedQueueItemIds,
+        IReadOnlyList<QueueTrackItemDto> Queue
+    );
+
+    public sealed record VoteResponseDto(
+        string Message,
+        int QueueItemId,
+        int VotesCount,
+        bool HasVoted
+    );
+
+    public sealed record ArchivedPlayedTrackDto(
+        int SongId,
+        string Title,
+        string Artist,
+        string ArtistName,
+        string? SpotifyId,
+        string Source,
+        int Votes
+    );
+
+    public sealed record ArchiveBreakResponseDto(
+        string Message,
+        int BreakId,
+        int BreakNumber,
+        int ArchivedTracksCount,
+        int TotalClearedTracks,
+        IReadOnlyList<ArchivedPlayedTrackDto> ArchivedTracks
+    );
 
     public interface IQueueService
     {
@@ -53,6 +169,7 @@ namespace schoolmusic_backend.Services
         private readonly IConfiguration? _configuration;
         private readonly IQueueMutationLock _mutationLock;
         private readonly TimeProvider _timeProvider;
+        private readonly IVotingTargetService _votingTargetService;
         private readonly ILogger<QueueService>? _logger;
 
         public QueueService(
@@ -63,7 +180,8 @@ namespace schoolmusic_backend.Services
             IConfiguration? configuration = null,
             IQueueMutationLock? mutationLock = null,
             TimeProvider? timeProvider = null,
-            ILogger<QueueService>? logger = null)
+            ILogger<QueueService>? logger = null,
+            IVotingTargetService? votingTargetService = null)
         {
             _context = context;
             _redis = redis;
@@ -73,51 +191,24 @@ namespace schoolmusic_backend.Services
             _mutationLock = mutationLock ?? DefaultMutationLock;
             _timeProvider = timeProvider ?? TimeProvider.System;
             _logger = logger;
-        }
-
-        /// <summary>
-        /// Sprawdza, czy głosowanie na daną przerwę jest aktualnie zamknięte.
-        /// Gdy włączona jest opcja Voting:AllowVotingOutsideSchedule (np. w Development), głosowanie jest zawsze otwarte.
-        /// W trybie produkcyjnym głosowanie jest zablokowane wyłącznie w oknie od VoteEnds (lub StartAt) do EndsAt bieżącego dnia.
-        /// </summary>
-        private bool IsVotingClosedForBreak(Break breakEntity, DateTime now)
-        {
-            bool allowOutside = _configuration?.GetValue<bool>("Voting:AllowVotingOutsideSchedule") ?? false;
-            if (allowOutside)
-            {
-                return false;
-            }
-
-            var today = DateOnly.FromDateTime(now);
-            var startAt = today.ToDateTime(TimeOnly.FromDateTime(breakEntity.StartAt));
-            var endsAt = today.ToDateTime(TimeOnly.FromDateTime(breakEntity.EndsAt));
-            if (endsAt <= startAt)
-            {
-                endsAt = endsAt.AddDays(1);
-            }
-
-            var voteEndTime = breakEntity.VoteEnds.HasValue
-                ? today.ToDateTime(TimeOnly.FromDateTime(breakEntity.VoteEnds.Value))
-                : startAt;
-
-            // Okno zamkniętego głosowania to czas od voteEndTime do endsAt
-            if (now >= voteEndTime && now < endsAt)
-            {
-                return true;
-            }
-
-            return false;
+            _votingTargetService = votingTargetService ?? new VotingTargetService(context, configuration, _timeProvider);
         }
 
         /// <summary>
         /// Wysyła zaktualizowaną listę utworów dla podanego breakId do klientów w grupie SignalR
         /// </summary>
-        /// <remarks>Pobiera zatwierdzone (lub bez statusu moderacji) elementy kolejki wraz z powiązanymi
-        /// danymi, sortuje po liczbie głosów i indeksie kolejności, a następnie emituje zdarzenie 'QueueUpdated' do
-        /// grupy 'Break_{breakId}' z liczbą utworów i rankingiem</remarks>
-        public async Task BroadcastQueueAsync(int breakId)
+        public Task BroadcastQueueAsync(int breakId) =>
+            BroadcastQueueAsync(_context, _hubContext, breakId);
+
+        /// <summary>
+        /// Buduje ranking kolejki dla podanego breakId i emituje pełne metadane przez SignalR.
+        /// </summary>
+        public static async Task BroadcastQueueAsync(
+            schoolmusicContext context,
+            IHubContext<QueueHub> hubContext,
+            int breakId)
         {
-            var items = await _context.QueueItems
+            var items = await context.QueueItems
                 .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
                 .Include(q => q.Song)
                     .ThenInclude(s => s.Artist)
@@ -128,22 +219,28 @@ namespace schoolmusic_backend.Services
             var ranking = items
                 .OrderByDescending(q => q.Votes.Count)
                 .ThenBy(q => q.OrderIndex)
-                .Select((q, index) => new
-                {
-                    position = index + 1,
-                    queueItemId = q.Id,
-                    songId = q.SongId,
-                    title = q.Song.Title,
-                    artistName = q.Song.Artist?.Name ?? "Nieznany wykonawca",
-                    cover = q.Song.Cover,
-                    durationMs = q.Song.DurationMs,
-                    votesCount = q.Votes.Count,
-                    submittedBy = q.User?.UserLogin ?? "Uczeń",
-                    orderIndex = q.OrderIndex
-                })
+                .Select((q, index) => new QueueBroadcastItemDto(
+                    Position: index + 1,
+                    QueueItemId: q.Id,
+                    SongId: q.SongId,
+                    Title: q.Song.Title,
+                    ArtistId: q.Song.ArtistId,
+                    ArtistName: q.Song.Artist?.Name ?? "Nieznany wykonawca",
+                    Cover: q.Song.Cover,
+                    DurationMs: q.Song.DurationMs,
+                    Genre: q.Song.Genre,
+                    Source: q.Song.Source,
+                    SongUrl: q.Song.SongUrl,
+                    SpotifyId: q.Song.SpotifyId,
+                    Status: q.Status,
+                    ModerationStatus: q.ModerationStatus,
+                    VotesCount: q.Votes.Count,
+                    SubmittedBy: q.User?.UserLogin ?? "Uczeń",
+                    OrderIndex: q.OrderIndex
+                ))
                 .ToList();
 
-            await _hubContext.Clients.Group($"Break_{breakId}").SendAsync("QueueUpdated", new
+            await hubContext.Clients.Group($"Break_{breakId}").SendAsync("QueueUpdated", new
             {
                 breakId,
                 totalSongs = ranking.Count,
@@ -152,19 +249,14 @@ namespace schoolmusic_backend.Services
         }
 
         /// <summary>
-        /// Zwraca uporządkowaną kolejkę utworów dla podanej przerwy wraz z metadanymi utworów i informacją o głosach
+        /// Zwraca uporządkowaną kolejkę utworów dla podanej przerwy wraz ze statusem głosowania,
+        /// głosem bieżącego użytkownika i metadanymi Spotify.
         /// </summary>
-        /// <remarks>Uwzględniane są tylko elementy z ModerationStatus równym 'approved' lub null.
-        /// Kolekcja jest sortowana najpierw malejąco po liczbie głosów, następnie rosnąco po OrderIndex. Pole
-        /// artistName zwraca 'Nieznany wykonawca' jeśli brak wykonawcy</remarks>
-        /// <returns>Task z ServiceResult zawierającym obiekt ze szczegółami przerwy, łączną liczbą utworów i listą elementów
-        /// kolejki; zwraca NotFound, jeśli przerwa nie istnieje.</returns>
         public async Task<ServiceResult<object>> GetQueueForBreakAsync(int breakId, int? currentUserId)
         {
             var breakEntity = await _context.Breaks.FindAsync(breakId);
             if (breakEntity == null)
             {
-                // Fallback: jeśli podana przerwa nie istnieje, spróbuj użyć pierwszej dostępnej
                 breakEntity = await _context.Breaks.OrderBy(b => b.BreakNumber).FirstOrDefaultAsync();
                 if (breakEntity == null)
                 {
@@ -173,6 +265,7 @@ namespace schoolmusic_backend.Services
                 breakId = breakEntity.Id;
             }
 
+            var evaluation = await _votingTargetService.EvaluateBreakAsync(breakId);
             var items = await _context.QueueItems
                 .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
                 .Include(q => q.Song)
@@ -184,29 +277,51 @@ namespace schoolmusic_backend.Services
             var ranking = items
                 .OrderByDescending(q => q.Votes.Count)
                 .ThenBy(q => q.OrderIndex)
-                .Select((q, index) => new
-                {
-                    position = index + 1,
-                    queueItemId = q.Id,
-                    songId = q.SongId,
-                    title = q.Song.Title,
-                    artistName = q.Song.Artist?.Name ?? "Nieznany wykonawca",
-                    cover = q.Song.Cover,
-                    durationMs = q.Song.DurationMs,
-                    votesCount = q.Votes.Count,
-                    hasVoted = currentUserId.HasValue && q.Votes.Any(v => v.UserId == currentUserId.Value),
-                    submittedBy = q.User?.UserLogin ?? "Uczeń",
-                    orderIndex = q.OrderIndex
-                })
+                .Select((q, index) => new QueueTrackItemDto(
+                    Position: index + 1,
+                    QueueItemId: q.Id,
+                    SongId: q.SongId,
+                    Title: q.Song.Title,
+                    ArtistId: q.Song.ArtistId,
+                    ArtistName: q.Song.Artist?.Name ?? "Nieznany wykonawca",
+                    Cover: q.Song.Cover,
+                    DurationMs: q.Song.DurationMs,
+                    Genre: q.Song.Genre,
+                    Source: q.Song.Source,
+                    SongUrl: q.Song.SongUrl,
+                    SpotifyId: q.Song.SpotifyId,
+                    Status: q.Status,
+                    ModerationStatus: q.ModerationStatus,
+                    VotesCount: q.Votes.Count,
+                    HasVoted: currentUserId.HasValue && q.Votes.Any(v => v.UserId == currentUserId.Value),
+                    SubmittedBy: q.User?.UserLogin ?? "Uczeń",
+                    OrderIndex: q.OrderIndex
+                ))
                 .ToList();
 
-            return ServiceResult<object>.Ok(new
-            {
-                breakId = breakEntity.Id,
-                breakNumber = breakEntity.BreakNumber,
-                totalSongs = ranking.Count,
-                queue = ranking
-            });
+            var userVotedIds = ranking
+                .Where(item => item.HasVoted)
+                .Select(item => item.QueueItemId)
+                .ToList();
+
+            var response = new QueueForBreakResponseDto(
+                BreakId: breakEntity.Id,
+                BreakNumber: breakEntity.BreakNumber,
+                BreakDate: evaluation?.TargetDate ?? breakEntity.BreakDate,
+                StartsAt: evaluation?.StartsAt ?? new DateTimeOffset(breakEntity.StartAt, _timeProvider.LocalTimeZone.GetUtcOffset(breakEntity.StartAt)),
+                EndsAt: evaluation?.EndsAt ?? new DateTimeOffset(breakEntity.EndsAt, _timeProvider.LocalTimeZone.GetUtcOffset(breakEntity.EndsAt)),
+                CutoffAt: evaluation?.CutoffAt ?? new DateTimeOffset(breakEntity.VoteEnds ?? breakEntity.StartAt, _timeProvider.LocalTimeZone.GetUtcOffset(breakEntity.VoteEnds ?? breakEntity.StartAt)),
+                TimeZone: _timeProvider.LocalTimeZone.Id,
+                IsVotingOpen: evaluation?.IsOpen ?? true,
+                VotingStatus: evaluation?.Status ?? "open",
+                VotingReasonCode: evaluation?.ReasonCode ?? "voting_open",
+                VotingReason: evaluation?.Reason ?? "Głosowanie jest otwarte.",
+                TotalSongs: ranking.Count,
+                UserVotedQueueItemIds: userVotedIds,
+                Queue: ranking
+            );
+
+            return ServiceResult<object>.Ok(response);
         }
 
         /// <summary>
@@ -214,20 +329,14 @@ namespace schoolmusic_backend.Services
         /// cooldown, otwarte głosowanie) i albo automatycznie zatwierdza utwór z greenlisty, albo umieszcza propozycję
         /// w kolejce do weryfikacji moderatorów
         /// </summary>
-        /// <returns>ServiceResult&lt;object&gt; z odpowiednim statusem i danymi: Forbidden gdy użytkownik zablokowany; NotFound gdy
-        /// utwór lub przerwa nie istnieje; BadRequest dla nieprawidłowych warunków (czarna lista, cooldown, zamknięte
-        /// głosowanie, brak przerw); Conflict gdy propozycja już istnieje; Created gdy utwór z greenlisty został
-        /// zatwierdzony; Accepted gdy propozycja przesłana do moderacji</returns>
         public async Task<ServiceResult<object>> ProposeSongAsync(ProposeSongDto dto, int currentUserId)
         {
-            // Sprawdzenie blokady użytkownika
             bool isBanned = await _context.BannedUsers.AnyAsync(b => b.UserId == currentUserId);
             if (isBanned)
             {
                 return ServiceResult<object>.Forbidden("Twoje konto zostało zablokowane i nie ma uprawnień do zgłaszania utworów.");
             }
 
-            // Wyszukanie utworu w bazie
             Song? song = null;
             if (dto.SongId.HasValue)
             {
@@ -235,7 +344,9 @@ namespace schoolmusic_backend.Services
             }
             else if (!string.IsNullOrWhiteSpace(dto.SpotifyId))
             {
-                song = await _context.Songs.Include(s => s.Artist).FirstOrDefaultAsync(s => s.SpotifyId == dto.SpotifyId);
+                var normalizedSpotifyId = SpotifyTrackImporter.NormalizeSpotifyTrackId(dto.SpotifyId);
+                song = await _context.Songs.Include(s => s.Artist)
+                    .FirstOrDefaultAsync(s => s.SpotifyId == normalizedSpotifyId || s.SpotifyId == dto.SpotifyId);
                 if (song == null)
                 {
                     if (!_songSourceService.IsConfigured)
@@ -248,7 +359,6 @@ namespace schoolmusic_backend.Services
                 }
             }
 
-            // Fallback: wyszukanie po tytule i opcjonalnie autorze
             if (song == null && !string.IsNullOrWhiteSpace(dto.Title))
             {
                 var normTitle = dto.Title.Trim().ToLower();
@@ -260,7 +370,6 @@ namespace schoolmusic_backend.Services
                 }
                 song ??= await candidateQuery.FirstOrDefaultAsync();
 
-                // Jeśli utwór nadal nie istnieje, a podano tytuł i wykonawcę (np. zgłoszenie z panelu WWW)
                 if (song == null && !string.IsNullOrWhiteSpace(dto.Artist))
                 {
                     var artistName = dto.Artist.Trim();
@@ -295,7 +404,6 @@ namespace schoolmusic_backend.Services
                 return ServiceResult<object>.NotFound("Nie znaleziono utworu w bazie danych ani w Spotify.");
             }
 
-            // Sprawdzenie czarnej listy
             bool isSongBlacklisted = await _context.SongBlacklists.AnyAsync(sb => sb.SongId == song.Id);
             bool isArtistBlacklisted = await _context.ArtistBlacklists.AnyAsync(ab => ab.ArtistId == song.ArtistId);
 
@@ -304,7 +412,6 @@ namespace schoolmusic_backend.Services
                 return ServiceResult<object>.BadRequest("Ten utwór lub wykonawca znajduje się na czarnej liście i nie może być odtwarzany.");
             }
 
-            // Sprawdzenie cooldownu (czy utwór nie był odtwarzany w ciągu ostatnich 24 godzin)
             var lastPlayed = await _context.Histories
                 .Where(h => h.SongId == song.Id)
                 .OrderByDescending(h => h.PlayedAt)
@@ -318,11 +425,7 @@ namespace schoolmusic_backend.Services
                 return ServiceResult<object>.BadRequest($"Ten utwór był niedawno odtwarzany na radiowęźle ({lastPlayed.PlayedAt:dd.MM HH:mm}). Będzie dostępny do ponownego zgłoszenia za ok. {hours} godz.");
             }
 
-            // Ustalenie przerwy docelowej
             int targetBreakId;
-            var now = _timeProvider.GetLocalNow().DateTime;
-            var today = DateOnly.FromDateTime(now);
-
             if (dto.BreakId.HasValue)
             {
                 var selectedBreak = await _context.Breaks.FindAsync(dto.BreakId.Value);
@@ -334,20 +437,32 @@ namespace schoolmusic_backend.Services
             }
             else
             {
-                var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
-                var candidate = allBreaks.FirstOrDefault(b => !IsVotingClosedForBreak(b, now));
-
-                if (candidate == null)
+                var votingTarget = await _votingTargetService.GetVotingTargetAsync();
+                if (votingTarget.EligibleBreakId.HasValue)
                 {
-                    candidate = allBreaks.FirstOrDefault();
+                    targetBreakId = votingTarget.EligibleBreakId.Value;
                 }
-
-                if (candidate == null)
+                else
                 {
-                    return ServiceResult<object>.BadRequest("Brak zdefiniowanych przerw w harmonogramie.");
-                }
+                    var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
+                    Break? candidate = null;
+                    foreach (var brk in allBreaks)
+                    {
+                        if (!await _votingTargetService.IsVotingClosedForBreakAsync(brk))
+                        {
+                            candidate = brk;
+                            break;
+                        }
+                    }
 
-                targetBreakId = candidate.Id;
+                    candidate ??= allBreaks.FirstOrDefault();
+                    if (candidate == null)
+                    {
+                        return ServiceResult<object>.BadRequest("Brak zdefiniowanych przerw w harmonogramie.");
+                    }
+
+                    targetBreakId = candidate.Id;
+                }
             }
 
             var targetBreakEntity = await _context.Breaks.FindAsync(targetBreakId);
@@ -356,17 +471,15 @@ namespace schoolmusic_backend.Services
                 return ServiceResult<object>.BadRequest("Nieprawidłowa przerwa docelowa.");
             }
 
-            // Sprawdzenie czy głosowanie jest jeszcze otwarte
-            if (dto.BreakId.HasValue && IsVotingClosedForBreak(targetBreakEntity, now))
+            if (dto.BreakId.HasValue && await _votingTargetService.IsVotingClosedForBreakAsync(targetBreakEntity))
             {
                 return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę zostało już zamknięte.");
             }
 
+            var songMetadata = ToProposedSongMetadata(song);
             await using var mutationLock = await _mutationLock.AcquireAsync(targetBreakId);
 
-            // Sprawdzenie czy utwór jest na Greenliście
             var greenlistEntry = await _context.SongGreenlists.FirstOrDefaultAsync(g => g.SongId == song.Id);
-
             if (greenlistEntry != null)
             {
                 bool alreadyQueued = await _context.QueueItems
@@ -430,26 +543,17 @@ namespace schoolmusic_backend.Services
                     queueItem.Id,
                     targetBreakId);
 
-                return ServiceResult<object>.Created(new
-                {
-                    Status = "approved",
-                    Message = "Utwór znajduje się na zielonej liście i został automatycznie zatwierdzony do kolejki!",
-                    queueItemId = queueItem.Id,
-                    breakId = targetBreakId,
-                    breakNumber = targetBreakEntity.BreakNumber,
-                    song = new
-                    {
-                        songId = song.Id,
-                        title = song.Title,
-                        artist = song.Artist?.Name ?? "Nieznany wykonawca",
-                        cover = song.Cover,
-                        durationMs = song.DurationMs
-                    },
-                    votesCount = 1
-                });
+                return ServiceResult<object>.Created(new ProposeSongApprovedDto(
+                    Status: "approved",
+                    Message: "Utwór znajduje się na zielonej liście i został automatycznie zatwierdzony do kolejki!",
+                    QueueItemId: queueItem.Id,
+                    BreakId: targetBreakId,
+                    BreakNumber: targetBreakEntity.BreakNumber,
+                    Song: songMetadata,
+                    VotesCount: 1
+                ));
             }
 
-            // Utwór spoza Greenlisty trafia do Redis do weryfikacji przez moderatorów
             try
             {
                 var db = _redis.GetDatabase();
@@ -464,12 +568,15 @@ namespace schoolmusic_backend.Services
                 }
 
                 var userEntity = await _context.Users.FindAsync(currentUserId);
+                var proposalId = Guid.NewGuid().ToString();
 
                 var proposal = new
                 {
-                    id = Guid.NewGuid().ToString(),
+                    id = proposalId,
                     songId = song.Id,
                     spotifyId = song.SpotifyId,
+                    source = song.Source,
+                    songUrl = song.SongUrl,
                     title = song.Title,
                     artist = song.Artist?.Name ?? "Nieznany wykonawca",
                     cover = song.Cover,
@@ -484,7 +591,7 @@ namespace schoolmusic_backend.Services
                 var deduplicationKey = PendingProposalStore.GetDeduplicationKey(targetBreakId, song.Id);
                 var reserved = await db.StringSetAsync(
                     deduplicationKey,
-                    proposal.id,
+                    proposalId,
                     expiry: (TimeSpan?)null,
                     when: When.NotExists);
                 if (!reserved)
@@ -517,26 +624,18 @@ namespace schoolmusic_backend.Services
 
                 _logger?.LogInformation(
                     "Zapisano propozycję {ProposalId} utworu {SongId} dla przerwy {BreakId} w kolejce moderacji.",
-                    proposal.id,
+                    proposalId,
                     song.Id,
                     targetBreakId);
 
-                return ServiceResult<object>.Accepted(new
-                {
-                    Status = "pending",
-                    Message = "Piosenka została przesłana do weryfikacji przez moderatora. Po zatwierdzeniu pojawi się w rankingu.",
-                    proposalId = proposal.id,
-                    breakId = targetBreakId,
-                    breakNumber = targetBreakEntity.BreakNumber,
-                    song = new
-                    {
-                        songId = song.Id,
-                        title = song.Title,
-                        artist = song.Artist?.Name ?? "Nieznany wykonawca",
-                        cover = song.Cover,
-                        durationMs = song.DurationMs
-                    }
-                });
+                return ServiceResult<object>.Accepted(new ProposeSongPendingDto(
+                    Status: "pending",
+                    Message: "Piosenka została przesłana do weryfikacji przez moderatora. Po zatwierdzeniu pojawi się w rankingu.",
+                    ProposalId: proposalId,
+                    BreakId: targetBreakId,
+                    BreakNumber: targetBreakEntity.BreakNumber,
+                    Song: songMetadata
+                ));
             }
             catch (RedisException ex)
             {
@@ -552,12 +651,6 @@ namespace schoolmusic_backend.Services
         /// <summary>
         /// Oddaje głos dla pozycji w kolejce przerwy; w razie potrzeby może automatycznie dodać utwór z zielonej listy
         /// </summary>
-        /// <remarks>Może dodać pozycję do kolejki z zielonej listy (z zachowaniem cooldownu), weryfikuje
-        /// blokady użytkownika i termin głosowania, zapobiega podwójnemu głosowaniu oraz emituje aktualizację
-        /// kolejki</remarks>
-        /// <returns>Task zawierający ServiceResult z odpowiednim statusem. Przy powodzeniu zwraca obiekt z polami: Message,
-        /// queueItemId, votesCount i hasVoted; w innych przypadkach zwraca Forbidden, NotFound, BadRequest lub Conflict
-        /// z opisem błędu</returns>
         public async Task<ServiceResult<object>> VoteAsync(VoteRequestDto dto, int currentUserId)
         {
             bool isBanned = await _context.BannedUsers.AnyAsync(b => b.UserId == currentUserId);
@@ -600,7 +693,7 @@ namespace schoolmusic_backend.Services
                     if (breakEntity == null)
                         return ServiceResult<object>.NotFound("Przerwa docelowa nie istnieje.");
 
-                    if (IsVotingClosedForBreak(breakEntity, _timeProvider.GetLocalNow().DateTime))
+                    if (await _votingTargetService.IsVotingClosedForBreakAsync(breakEntity))
                         return ServiceResult<object>.BadRequest("Głosowanie na tę przerwę dobiegło już końca.");
 
                     QueueItem? targetQueueItem;
@@ -623,7 +716,6 @@ namespace schoolmusic_backend.Services
                             .FirstOrDefaultAsync(q => q.BreakId == targetBreakId && q.SongId == songId);
                         if (targetQueueItem == null)
                         {
-                            // Sprawdzenie cooldownu przed automatycznym dodaniem z Greenlisty
                             var lastPlayed = await _context.Histories
                                 .Where(h => h.SongId == songId)
                                 .OrderByDescending(h => h.PlayedAt)
@@ -700,21 +792,18 @@ namespace schoolmusic_backend.Services
                 targetQueueItemId,
                 targetBreakId);
 
-            return ServiceResult<object>.Ok(new
-            {
-                Message = "Głos został pomyślnie oddany!",
-                queueItemId = targetQueueItemId,
-                votesCount = totalVotes,
-                hasVoted = true
-            });
+            return ServiceResult<object>.Ok(new VoteResponseDto(
+                Message: "Głos został pomyślnie oddany!",
+                QueueItemId: targetQueueItemId,
+                VotesCount: totalVotes,
+                HasVoted: true
+            ));
         }
 
         /// <summary>
-        /// Usuwa głos użytkownika dla wskazanego elementu kolejki, zapisuje zmiany 
+        /// Usuwa głos użytkownika dla wskazanego elementu kolejki, zapisuje zmiany
         /// oraz powiadamia klientów o aktualizacji kolejki
         /// </summary>
-        /// <returns>ServiceResult zawierający wynik operacji: NotFound, jeśli głos nie istnieje, lub Ok z danymi (wiadomość,
-        /// queueItemId, votesCount, hasVoted) po pomyślnym usunięciu</returns>
         public async Task<ServiceResult<object>> RemoveVoteAsync(int queueItemId, int currentUserId)
         {
             var breakId = await _context.QueueItems
@@ -734,7 +823,7 @@ namespace schoolmusic_backend.Services
                 if (vote == null)
                     return ServiceResult<object>.NotFound("Nie oddałeś głosu na ten utwór lub został on już cofnięty.");
                 if (vote.QueueItem.Status != QueueItemStatuses.Queued ||
-                    IsVotingClosedForBreak(vote.QueueItem.Break, _timeProvider.GetLocalNow().DateTime))
+                    await _votingTargetService.IsVotingClosedForBreakAsync(vote.QueueItem.Break))
                     return ServiceResult<object>.BadRequest("Nie można cofnąć głosu po zamknięciu głosowania lub rozpoczęciu odtwarzania utworu.");
 
                 _context.Votes.Remove(vote);
@@ -749,26 +838,22 @@ namespace schoolmusic_backend.Services
                 queueItemId,
                 breakId.Value);
 
-            return ServiceResult<object>.Ok(new
-            {
-                Message = "Głos został pomyślnie cofnięty.",
-                queueItemId,
-                votesCount = remainingVotes,
-                hasVoted = false
-            });
+            return ServiceResult<object>.Ok(new VoteResponseDto(
+                Message: "Głos został pomyślnie cofnięty.",
+                QueueItemId: queueItemId,
+                VotesCount: remainingVotes,
+                HasVoted: false
+            ));
         }
 
         /// <summary>
         /// Archiwizuje przerwę o podanym identyfikatorze: zapisuje odtworzone utwory do historii, czyści kolejkę
         /// (usuwając pozycje i powiązane głosy) oraz wysyła powiadomienie SignalR
         /// </summary>
-        /// <returns>ServiceResult zawierający obiekt z informacjami o wyniku operacji (komunikat, breakId, breakNumber, liczby
-        /// zarchiwizowanych i wyczyszczonych utworów oraz lista zarchiwizowanych utworów) lub wynik błędu (np. NotFound
-        /// gdy przerwa nie istnieje)</returns>
         public async Task<ServiceResult<object>> ArchiveBreakAsync(int breakId)
         {
             sbyte breakNumber;
-            var playedTracksInfo = new List<object>();
+            var playedTracksInfo = new List<ArchivedPlayedTrackDto>();
             var totalClearedTracks = 0;
 
             await using (var mutationLock = await _mutationLock.AcquireAsync(breakId))
@@ -782,7 +867,6 @@ namespace schoolmusic_backend.Services
                     ? await _context.Database.BeginTransactionAsync()
                     : null;
 
-                // Pobieramy wszystkie zatwierdzone pozycje z kolejki tej przerwy
                 var approvedQueueItems = await _context.QueueItems
                     .Where(q => q.BreakId == breakId && (q.ModerationStatus == "approved" || q.ModerationStatus == null))
                     .Include(q => q.Song)
@@ -793,7 +877,6 @@ namespace schoolmusic_backend.Services
                     .Where(item => item.Status == QueueItemStatuses.Played || item.Status == QueueItemStatuses.Playing)
                     .ToList();
 
-                // Status kolejki jest aktualizowany przez odpytywanie Spotify; archiwizujemy tylko rozpoczęte utwory.
                 var now = _timeProvider.GetUtcNow().UtcDateTime;
                 foreach (var played in playedItems)
                 {
@@ -805,16 +888,18 @@ namespace schoolmusic_backend.Services
                         Votes = played.Votes.Count
                     });
 
-                    playedTracksInfo.Add(new
-                    {
-                        songId = played.SongId,
-                        title = played.Song.Title,
-                        artist = played.Song.Artist?.Name ?? "Nieznany wykonawca",
-                        votes = played.Votes.Count
-                    });
+                    var artistName = played.Song.Artist?.Name ?? "Nieznany wykonawca";
+                    playedTracksInfo.Add(new ArchivedPlayedTrackDto(
+                        SongId: played.SongId,
+                        Title: played.Song.Title,
+                        Artist: artistName,
+                        ArtistName: artistName,
+                        SpotifyId: played.Song.SpotifyId,
+                        Source: played.Song.Source,
+                        Votes: played.Votes.Count
+                    ));
                 }
 
-                // Usuwamy wszystkie QueueItems i powiązane głosy dla tej przerwy (czyścimy kolejkę)
                 var allBreakQueueItems = await _context.QueueItems
                     .Where(q => q.BreakId == breakId)
                     .Include(q => q.Votes)
@@ -832,7 +917,6 @@ namespace schoolmusic_backend.Services
                     await transaction.CommitAsync();
             }
 
-            // Rozsyłamy powiadomienie SignalR (kolejka jest teraz wyczyszczona)
             await BroadcastQueueAsync(breakId);
             _logger?.LogInformation(
                 "Zarchiwizowano przerwę {BreakId}: {ArchivedCount} odtworzonych i {ClearedCount} usuniętych pozycji.",
@@ -840,15 +924,31 @@ namespace schoolmusic_backend.Services
                 playedTracksInfo.Count,
                 totalClearedTracks);
 
-            return ServiceResult<object>.Ok(new
-            {
-                Message = $"Przerwa #{breakNumber} została pomyślnie zarchiwizowana. Zapisano historię i wyczyszczono kolejkę.",
-                breakId,
-                breakNumber,
-                archivedTracksCount = playedTracksInfo.Count,
-                totalClearedTracks,
-                archivedTracks = playedTracksInfo
-            });
+            return ServiceResult<object>.Ok(new ArchiveBreakResponseDto(
+                Message: $"Przerwa #{breakNumber} została pomyślnie zarchiwizowana. Zapisano historię i wyczyszczono kolejkę.",
+                BreakId: breakId,
+                BreakNumber: breakNumber,
+                ArchivedTracksCount: playedTracksInfo.Count,
+                TotalClearedTracks: totalClearedTracks,
+                ArchivedTracks: playedTracksInfo
+            ));
+        }
+
+        private static ProposedSongMetadataDto ToProposedSongMetadata(Song song)
+        {
+            var artistName = song.Artist?.Name ?? "Nieznany wykonawca";
+            return new ProposedSongMetadataDto(
+                SongId: song.Id,
+                Title: song.Title,
+                Artist: artistName,
+                ArtistName: artistName,
+                ArtistId: song.ArtistId,
+                Cover: song.Cover,
+                DurationMs: song.DurationMs,
+                Genre: song.Genre,
+                Source: song.Source,
+                SongUrl: song.SongUrl,
+                SpotifyId: song.SpotifyId);
         }
     }
 }

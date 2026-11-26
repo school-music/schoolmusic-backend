@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 
@@ -27,6 +28,7 @@ public record UpdateBreakTemplateDto(int BreakNumber, TimeOnly StartsTime, TimeO
 [Route("api/breaks/templates")]
 [ApiController]
 [Authorize(Roles = "admin,head_admin")]
+[Produces("application/json")]
 public class BreakTemplatesController(
     schoolmusicContext context,
     IBreakSchedulerService? scheduler = null,
@@ -42,6 +44,9 @@ public class BreakTemplatesController(
     /// Pobiera listę wszystkich szablonów przerw posortowanych według numeru przerwy.
     /// </summary>
     [HttpGet]
+    [ProducesResponseType<IReadOnlyList<BreakTemplateDto>>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
     public async Task<ActionResult<IReadOnlyList<BreakTemplateDto>>> GetBreakTemplates()
     {
         var templates = await context.BreakTemplates
@@ -59,18 +64,22 @@ public class BreakTemplatesController(
     /// <summary>
     /// Tworzy nowy szablon przerwy szkolnej.
     /// </summary>
-    /// <param name="dto">Dane nowego szablonu przerwy.</param>
     [HttpPost]
+    [ProducesResponseType<BreakTemplateDto>(StatusCodes.Status201Created)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> CreateBreakTemplate(CreateBreakTemplateDto dto)
     {
         if (!IsValid(dto.BreakNumber, dto.StartsTime, dto.EndsTime))
         {
-            return BadRequest(new { Message = "Numer przerwy musi być dodatni, a godzina końca późniejsza od godziny rozpoczęcia." });
+            return this.Create(StatusCodes.Status400BadRequest, "Numer przerwy musi być dodatni, a godzina końca późniejsza od godziny rozpoczęcia.");
         }
 
         if (await context.BreakTemplates.AnyAsync(template => template.BreakNumber == dto.BreakNumber))
         {
-            return Conflict(new { Message = $"Szablon przerwy nr {dto.BreakNumber} już istnieje." });
+            return this.Create(StatusCodes.Status409Conflict, $"Szablon przerwy nr {dto.BreakNumber} już istnieje.");
         }
 
         var template = new BreakTemplate
@@ -90,32 +99,36 @@ public class BreakTemplatesController(
     /// <summary>
     /// Aktualizuje godziny lub numer istniejącego szablonu przerwy.
     /// </summary>
-    /// <param name="id">Identyfikator szablonu przerwy.</param>
-    /// <param name="dto">Zaktualizowane dane szablonu przerwy.</param>
     [HttpPut("{id:int}")]
+    [ProducesResponseType<BreakTemplateDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> UpdateBreakTemplate(int id, UpdateBreakTemplateDto dto)
     {
         if (!IsValid(dto.BreakNumber, dto.StartsTime, dto.EndsTime))
         {
-            return BadRequest(new { Message = "Numer przerwy musi być dodatni, a godzina końca późniejsza od godziny rozpoczęcia." });
+            return this.Create(StatusCodes.Status400BadRequest, "Numer przerwy musi być dodatni, a godzina końca późniejsza od godziny rozpoczęcia.");
         }
 
         var template = await context.BreakTemplates.FindAsync(id);
         if (template == null)
         {
-            return NotFound(new { Message = "Nie znaleziono szablonu przerwy o podanym ID." });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono szablonu przerwy o podanym ID.");
         }
 
         if (await context.BreakTemplates.AnyAsync(other =>
                 other.Id != id && other.BreakNumber == dto.BreakNumber))
         {
-            return Conflict(new { Message = $"Szablon przerwy nr {dto.BreakNumber} już istnieje." });
+            return this.Create(StatusCodes.Status409Conflict, $"Szablon przerwy nr {dto.BreakNumber} już istnieje.");
         }
 
         if (template.BreakNumber != dto.BreakNumber &&
             await HasReferencesAsync(template.BreakNumber))
         {
-            return Conflict(new { Message = "Nie można zmienić numeru szablonu, ponieważ jest używany przez przerwę lub ustawienie tygodniowe." });
+            return this.Create(StatusCodes.Status409Conflict, "Nie można zmienić numeru szablonu, ponieważ jest używany przez przerwę lub ustawienie tygodniowe.");
         }
 
         if (template.BreakNumber != dto.BreakNumber)
@@ -156,19 +169,23 @@ public class BreakTemplatesController(
     /// <summary>
     /// Usuwa szablon przerwy szkolnej.
     /// </summary>
-    /// <param name="id">Identyfikator usuwanego szablonu przerwy.</param>
     [HttpDelete("{id:int}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> DeleteBreakTemplate(int id)
     {
         var template = await context.BreakTemplates.FindAsync(id);
         if (template == null)
         {
-            return NotFound(new { Message = "Nie znaleziono szablonu przerwy o podanym ID." });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono szablonu przerwy o podanym ID.");
         }
 
         if (await HasReferencesAsync(template.BreakNumber))
         {
-            return Conflict(new { Message = "Nie można usunąć szablonu, ponieważ jest używany przez przerwę lub ustawienie tygodniowe." });
+            return this.Create(StatusCodes.Status409Conflict, "Nie można usunąć szablonu, ponieważ jest używany przez przerwę lub ustawienie tygodniowe.");
         }
 
         context.BreakTemplates.Remove(template);

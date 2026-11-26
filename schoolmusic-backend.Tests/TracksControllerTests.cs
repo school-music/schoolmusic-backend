@@ -290,10 +290,14 @@ public class TracksControllerTests
         var (controller, _) = CreateController(nameof(SearchTracks_ReturnsSpotifySearchResults), songSource: songSource);
 
         var result = Assert.IsType<OkObjectResult>(await controller.SearchTracks(q: "test"));
-        var track = Assert.Single(Assert.IsAssignableFrom<IEnumerable<object>>(result.Value));
-        Assert.Equal("spotify-id", track.GetType().GetProperty("externalId")?.GetValue(track));
-        Assert.Equal("Song", track.GetType().GetProperty("title")?.GetValue(track));
-        Assert.Equal("Artist", track.GetType().GetProperty("artist")?.GetValue(track));
+        var tracks = Assert.IsAssignableFrom<IEnumerable<ExternalTrackSearchItemDto>>(result.Value);
+        var track = Assert.Single(tracks);
+        Assert.Equal("spotify-id", track.ExternalId);
+        Assert.Equal("spotify-id", track.SpotifyId);
+        Assert.Equal("Song", track.Title);
+        Assert.Equal("Artist", track.Artist);
+        Assert.Equal("Artist", track.ArtistName);
+        Assert.Equal("spotify", track.Source);
     }
 
     [Fact]
@@ -309,7 +313,9 @@ public class TracksControllerTests
         var result = Assert.IsType<ObjectResult>(await controller.SearchTracks(q: "test"));
 
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, result.StatusCode);
-        Assert.Contains("Spotify:ClientId", result.Value?.GetType().GetProperty("Message")?.GetValue(result.Value)?.ToString());
+        var problem = Assert.IsType<ProblemDetails>(result.Value);
+        Assert.Contains("Spotify:ClientId", problem.Detail);
+        Assert.Contains("Spotify:ClientId", problem.Extensions["message"]?.ToString());
         songSource.Verify(source => source.SearchTracksAsync(It.IsAny<string>(), It.IsAny<int>()), Times.Never);
     }
 

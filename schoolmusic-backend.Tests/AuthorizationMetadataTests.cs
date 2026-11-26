@@ -16,6 +16,8 @@ public sealed class AuthorizationMetadataTests
 {
     private static readonly HashSet<string> ExpectedPublicEndpoints = new(StringComparer.OrdinalIgnoreCase)
     {
+        "GET api/auth/capabilities",
+        "GET api/auth/password-recovery/school-provider",
         "GET api/breaks",
         "GET api/breaks/current-status",
         "GET api/player/status",
@@ -23,6 +25,7 @@ public sealed class AuthorizationMetadataTests
         "GET api/queue/break/{breakId:int}",
         "GET api/queue/break/{breakId:int}/plan",
         "GET api/queue/now-playing",
+        "GET api/queue/voting-target",
         "GET api/rankings/artists",
         "GET api/rankings/history",
         "GET api/rankings/songs",
@@ -35,8 +38,13 @@ public sealed class AuthorizationMetadataTests
         "GET api/tracks/genres",
         "GET api/tracks/search",
         "GET api/tracks/{id:int}",
+        "POST api/auth/email/resend",
+        "POST api/auth/email/verify",
         "POST api/auth/ldap/login",
         "POST api/auth/login",
+        "POST api/auth/password-recovery/confirm",
+        "POST api/auth/password-recovery/request",
+        "POST api/auth/refresh",
         "POST api/auth/register",
         "POST api/auth/school/login"
     };

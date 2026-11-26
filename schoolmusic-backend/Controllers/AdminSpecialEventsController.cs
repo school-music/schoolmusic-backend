@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 
@@ -28,12 +29,18 @@ namespace schoolmusic_backend.Controllers
         string EventStatus
     );
 
+    public sealed record DeleteSpecialEventResponseDto(
+        string Message,
+        int Id
+    );
+
     /// <summary>
     /// Kontroler panelu administracyjnego do zarządzania wydarzeniami specjalnymi (dzwonki, apele, audycje specjalne).
     /// </summary>
     [Route("api/admin/special-events")]
     [ApiController]
     [Authorize(Roles = "admin,head_admin")]
+    [Produces("application/json")]
     public class AdminSpecialEventsController : ControllerBase
     {
         private readonly schoolmusicContext _context;
@@ -55,6 +62,9 @@ namespace schoolmusic_backend.Controllers
         /// Pobiera listę wszystkich wydarzeń specjalnych z opcjonalnym filtrowaniem po statusie.
         /// </summary>
         [HttpGet]
+        [ProducesResponseType<IReadOnlyList<SpecialEventDto>>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> GetSpecialEvents([FromQuery] string? status = null)
         {
             var query = _context.SpecialEvents.AsQueryable();
@@ -83,12 +93,16 @@ namespace schoolmusic_backend.Controllers
         /// Pobiera szczegóły pojedynczego wydarzenia specjalnego.
         /// </summary>
         [HttpGet("{id:int}")]
+        [ProducesResponseType<SpecialEventDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> GetSpecialEventById(int id)
         {
             var ev = await _context.SpecialEvents.FindAsync(id);
             if (ev == null)
             {
-                return NotFound(new { Message = "Nie znaleziono wydarzenia specjalnego o podanym ID." });
+                return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono wydarzenia specjalnego o podanym ID.");
             }
 
             return Ok(new SpecialEventDto(
@@ -104,11 +118,15 @@ namespace schoolmusic_backend.Controllers
         /// Tworzy nowe zaplanowane wydarzenie specjalne.
         /// </summary>
         [HttpPost]
+        [ProducesResponseType<SpecialEventDto>(StatusCodes.Status201Created)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
         public async Task<IActionResult> CreateSpecialEvent([FromBody] CreateSpecialEventDto dto)
         {
             if (string.IsNullOrWhiteSpace(dto.FileUrl))
             {
-                return BadRequest(new { Message = "Adres URL pliku dźwiękowego (FileUrl) jest wymagany." });
+                return this.Create(StatusCodes.Status400BadRequest, "Adres URL pliku dźwiękowego (FileUrl) jest wymagany.");
             }
 
             var status = string.IsNullOrWhiteSpace(dto.EventStatus)
@@ -117,7 +135,7 @@ namespace schoolmusic_backend.Controllers
 
             if (!ValidStatuses.Contains(status))
             {
-                return BadRequest(new { Message = "Nieprawidłowy status wydarzenia. Dozwolone: 'pending', 'playing', 'done'." });
+                return this.Create(StatusCodes.Status400BadRequest, "Nieprawidłowy status wydarzenia. Dozwolone: 'pending', 'playing', 'done'.");
             }
 
             var ev = new SpecialEvent
@@ -147,23 +165,28 @@ namespace schoolmusic_backend.Controllers
         /// Aktualizuje istniejące wydarzenie specjalne.
         /// </summary>
         [HttpPut("{id:int}")]
+        [ProducesResponseType<SpecialEventDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> UpdateSpecialEvent(int id, [FromBody] UpdateSpecialEventDto dto)
         {
             var ev = await _context.SpecialEvents.FindAsync(id);
             if (ev == null)
             {
-                return NotFound(new { Message = "Nie znaleziono wydarzenia specjalnego o podanym ID." });
+                return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono wydarzenia specjalnego o podanym ID.");
             }
 
             if (string.IsNullOrWhiteSpace(dto.FileUrl))
             {
-                return BadRequest(new { Message = "Adres URL pliku dźwiękowego (FileUrl) jest wymagany." });
+                return this.Create(StatusCodes.Status400BadRequest, "Adres URL pliku dźwiękowego (FileUrl) jest wymagany.");
             }
 
             var status = dto.EventStatus.Trim().ToLowerInvariant();
             if (!ValidStatuses.Contains(status))
             {
-                return BadRequest(new { Message = "Nieprawidłowy status wydarzenia. Dozwolone: 'pending', 'playing', 'done'." });
+                return this.Create(StatusCodes.Status400BadRequest, "Nieprawidłowy status wydarzenia. Dozwolone: 'pending', 'playing', 'done'.");
             }
 
             ev.Title = string.IsNullOrWhiteSpace(dto.Title) ? null : dto.Title.Trim();
@@ -187,19 +210,23 @@ namespace schoolmusic_backend.Controllers
         /// Usuwa wydarzenie specjalne.
         /// </summary>
         [HttpDelete("{id:int}")]
+        [ProducesResponseType<DeleteSpecialEventResponseDto>(StatusCodes.Status200OK)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> DeleteSpecialEvent(int id)
         {
             var ev = await _context.SpecialEvents.FindAsync(id);
             if (ev == null)
             {
-                return NotFound(new { Message = "Nie znaleziono wydarzenia specjalnego o podanym ID." });
+                return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono wydarzenia specjalnego o podanym ID.");
             }
 
             _context.SpecialEvents.Remove(ev);
             await _context.SaveChangesAsync();
             _scheduler?.NotifyScheduleChanged();
 
-            return Ok(new { Message = "Pomyślnie usunięto wydarzenie specjalne.", Id = id });
+            return Ok(new DeleteSpecialEventResponseDto("Pomyślnie usunięto wydarzenie specjalne.", id));
         }
 
         private DateTime ToSchoolLocalTime(DateTime value)

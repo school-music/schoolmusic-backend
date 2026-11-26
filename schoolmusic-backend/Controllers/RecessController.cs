@@ -1,13 +1,14 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using schoolmusic_backend.Models;
 using schoolmusic_backend.Extensions;
+using schoolmusic_backend.Models;
 using schoolmusic_backend.Services;
 
 [Route("api/breaks")]
 [ApiController]
 [Authorize]
+[Produces("application/json")]
 public class RecessController : ControllerBase
 {
     private readonly schoolmusicContext _context;
@@ -33,49 +34,97 @@ public class RecessController : ControllerBase
         _scheduler?.NotifyScheduleChanged();
     }
 
-    /// <summary>
-    /// Reprezentuje odpowiedź zawierającą dane dotyczące przerwy
-    /// </summary>
     public record BreakResponseDto(
-        int Id, 
-        int BreakNumber, 
-        DateTime StartAt, 
-        DateTime EndsAt, 
+        int Id,
+        int BreakNumber,
+        DateTime StartAt,
+        DateTime EndsAt,
         DateTime? VoteEnds,
         bool IsMuted = false,
         string? MuteReason = null
     );
-    /// <summary>
-    /// Dane transferu do aktualizacji wpisu harmonogramu przerwy
-    /// </summary>
+
     public record UpdateBreakScheduleItemDto(int Id, TimeOnly StartAt, TimeOnly EndsAt, TimeOnly? VoteEnds = null);
-    /// <summary>
-    /// Dane potrzebne do utworzenia dnia wyjątkowego
-    /// </summary>
     public record CreateExceptionDayDto(DateOnly StartDate, DateOnly? EndDate, string? DayType, string? Description);
-    /// <summary>
-    /// Dane potrzebne do utworzenia przerwy wyjątkowej
-    /// </summary>
     public record CreateExceptionBreakDto(DateOnly BreakDate, sbyte BreakNumber, bool MusicEnabled = false, string? Description = null);
 
+    public sealed record ExceptionBreakItemDto(
+        int Id,
+        DateOnly BreakDate,
+        sbyte BreakNumber,
+        bool MusicEnabled,
+        string? Description
+    );
+
+    public sealed record ExceptionDayItemDto(
+        int Id,
+        DateOnly StartDate,
+        DateOnly EndDate,
+        string DayType,
+        string? Description
+    );
+
+    public sealed record BreaksScheduleResponseDto(
+        DateOnly Date,
+        bool IsExceptionDay,
+        bool IsMusicEnabled,
+        string? ExceptionDescription,
+        string Message,
+        IReadOnlyList<BreakResponseDto> Przerwy,
+        IReadOnlyList<ExceptionBreakItemDto> WyjatkowePrzerwy
+    );
+
+    public sealed record CurrentBreakStatusResponseDto(
+        DateTime CurrentTime,
+        bool IsExceptionDay,
+        bool IsExceptionBreak,
+        bool IsBreakActive,
+        bool IsMusicEnabled,
+        string? MuteReason,
+        BreakResponseDto? ActiveBreak,
+        BreakResponseDto? NextBreak,
+        string Message
+    );
+
+    public sealed record ExceptionDaysListResponseDto(
+        string Message,
+        IReadOnlyList<ExceptionDayItemDto> Exceptions
+    );
+
+    public sealed record ExceptionDayMutationResponseDto(
+        string Message,
+        ExceptionDayItemDto ExceptionDay
+    );
+
+    public sealed record ExceptionBreaksListResponseDto(
+        string Message,
+        IReadOnlyList<ExceptionBreakItemDto> ExceptionBreaks
+    );
+
+    public sealed record ExceptionBreakMutationResponseDto(
+        string Message,
+        ExceptionBreakItemDto ExceptionBreak
+    );
+
+    public sealed record BreakMessageResponseDto(string Message);
+
     /// <summary>
-    /// Pobiera harmonogram przerw na dany dzień z informacją 
+    /// Pobiera harmonogram przerw na dany dzień z informacją
     /// czy obowiązuje ExceptionDay lub ExceptionBreak.
     /// </summary>
     [HttpGet]
     [AllowAnonymous]
+    [ProducesResponseType<BreaksScheduleResponseDto>(StatusCodes.Status200OK)]
     public async Task<IActionResult> GetBreaks([FromQuery] DateOnly? date)
     {
         var targetDate = date ?? DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
 
-        // check if its exception date
         var exceptionDay = await _context.ExceptionDays
             .Where(e => e.StartDate <= targetDate && targetDate <= e.EndDate)
             .FirstOrDefaultAsync();
 
         bool isExceptionDay = exceptionDay != null;
 
-        // get all exception breaks
         var exceptionBreaks = await _context.ExceptionBreaks
             .Where(eb => eb.BreakDate == targetDate)
             .ToListAsync();
@@ -87,7 +136,6 @@ public class RecessController : ControllerBase
 
         if (defaultBreaks.Count == 0)
         {
-            // Fallback: jeśli brak przerw wygenerowanych na dzisiejszą datę, pobierz przerwy bazowe
             defaultBreaks = await _context.Breaks
                 .OrderBy(b => b.BreakNumber)
                 .Take(8)
@@ -99,14 +147,13 @@ public class RecessController : ControllerBase
             var startAt = targetDate.ToDateTime(TimeOnly.FromDateTime(b.StartAt));
             var endsAt = targetDate.ToDateTime(TimeOnly.FromDateTime(b.EndsAt));
 
-            // check if this break is exception break
             var matchingExceptionBreak = exceptionBreaks.FirstOrDefault(eb =>
                 eb.BreakNumber == b.BreakNumber
             );
 
             bool isMuted = isExceptionDay || (matchingExceptionBreak != null && !matchingExceptionBreak.MusicEnabled);
-            string? muteReason = isExceptionDay 
-                ? exceptionDay?.Description 
+            string? muteReason = isExceptionDay
+                ? exceptionDay?.Description
                 : matchingExceptionBreak?.Description;
 
             return new BreakResponseDto(
@@ -120,54 +167,54 @@ public class RecessController : ControllerBase
             );
         }).ToList();
 
-        return Ok(new
-        {
-            Date = targetDate,
-            IsExceptionDay = isExceptionDay,
-            IsMusicEnabled = !isExceptionDay && breakList.Any(b => !b.IsMuted),
-            ExceptionDescription = exceptionDay?.Description,
-            Message = isExceptionDay
+        var exceptionBreakDtos = exceptionBreaks
+            .Select(eb => new ExceptionBreakItemDto(eb.Id, eb.BreakDate, eb.BreakNumber, eb.MusicEnabled, eb.Description))
+            .ToList();
+
+        return Ok(new BreaksScheduleResponseDto(
+            Date: targetDate,
+            IsExceptionDay: isExceptionDay,
+            IsMusicEnabled: !isExceptionDay && breakList.Any(b => !b.IsMuted),
+            ExceptionDescription: exceptionDay?.Description,
+            Message: isExceptionDay
                 ? $"W dniu {targetDate:yyyy-MM-dd} obowiązuje dzień bez muzyki ({exceptionDay?.Description})."
                 : $"Plan przerw na dzień {targetDate:yyyy-MM-dd}.",
-            Przerwy = breakList,
-            WyjatkowePrzerwy = exceptionBreaks
-        });
+            Przerwy: breakList,
+            WyjatkowePrzerwy: exceptionBreakDtos
+        ));
     }
 
     /// <summary>
-    /// Sprawdza bieżący status: czy trwa przerwa, 
-    /// czy muzyka ma grać, czy obowiązuje ExceptionDay 
-    /// lub ExceptionBreak.
+    /// Sprawdza bieżący status: czy trwa przerwa,
+    /// czy muzyka ma grać, czy obowiązuje ExceptionDay lub ExceptionBreak.
     /// </summary>
     [HttpGet("current-status")]
     [AllowAnonymous]
+    [ProducesResponseType<CurrentBreakStatusResponseDto>(StatusCodes.Status200OK)]
     public async Task<IActionResult> GetCurrentStatus()
     {
         var now = _timeProvider.GetLocalNow().DateTime;
         var today = DateOnly.FromDateTime(now);
 
-        // check if today is exception day
         var activeExceptionDay = await _context.ExceptionDays
             .Where(e => e.StartDate <= today && today <= e.EndDate)
             .FirstOrDefaultAsync();
 
         if (activeExceptionDay != null)
         {
-            return Ok(new
-            {
-                CurrentTime = now,
-                IsExceptionDay = true,
-                IsExceptionBreak = false,
-                IsMusicEnabled = false,
-                IsBreakActive = false,
-                MuteReason = activeExceptionDay.Description,
-                Message = $"Aktualnie trwa dzień wyjątkowy: {activeExceptionDay.Description}. Muzyka nie gra.",
-                ActiveBreak = (BreakResponseDto?)null,
-                NextBreak = (BreakResponseDto?)null
-            });
+            return Ok(new CurrentBreakStatusResponseDto(
+                CurrentTime: now,
+                IsExceptionDay: true,
+                IsExceptionBreak: false,
+                IsBreakActive: false,
+                IsMusicEnabled: false,
+                MuteReason: activeExceptionDay.Description,
+                ActiveBreak: null,
+                NextBreak: null,
+                Message: $"Aktualnie trwa dzień wyjątkowy: {activeExceptionDay.Description}. Muzyka nie gra."
+            ));
         }
 
-        // check exception breaks for today
         var todayExceptionBreaks = await _context.ExceptionBreaks
             .Where(eb => eb.BreakDate == today)
             .ToListAsync();
@@ -226,61 +273,55 @@ public class RecessController : ControllerBase
             message = "Wszystkie przerwy na dziś dobiegły końca.";
         }
 
-        return Ok(new
-        {
-            CurrentTime = now,
-            IsExceptionDay = false,
-            IsExceptionBreak = activeExceptionBreak != null,
-            IsBreakActive = activeBreak != null,
-            IsMusicEnabled = isMusicPlaying,
-            MuteReason = activeExceptionBreak?.Description,
-            ActiveBreak = activeBreak,
-            NextBreak = nextBreak,
-            Message = message
-        });
+        return Ok(new CurrentBreakStatusResponseDto(
+            CurrentTime: now,
+            IsExceptionDay: false,
+            IsExceptionBreak: activeExceptionBreak != null,
+            IsBreakActive: activeBreak != null,
+            IsMusicEnabled: isMusicPlaying,
+            MuteReason: activeExceptionBreak?.Description,
+            ActiveBreak: activeBreak,
+            NextBreak: nextBreak,
+            Message: message
+        ));
     }
 
     /// <summary>
-    /// Pobiera listę wszystkich zaplanowanych dni 
-    /// wyjątkowych (cały dzień bez muzyki).
+    /// Pobiera listę wszystkich zaplanowanych dni wyjątkowych (cały dzień bez muzyki).
     /// </summary>
     [HttpGet("exceptions")]
+    [ProducesResponseType<ExceptionDaysListResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> GetAllExceptionDays()
     {
         var exceptions = await _context.ExceptionDays
             .OrderByDescending(e => e.StartDate)
+            .Select(e => new ExceptionDayItemDto(e.Id, e.StartDate, e.EndDate, e.DayType, e.Description))
             .ToListAsync();
 
-        return Ok(new
-        {
-            Message = "Lista dni wyjątkowych",
-            Exceptions = exceptions
-        });
+        return Ok(new ExceptionDaysListResponseDto("Lista dni wyjątkowych", exceptions));
     }
 
     /// <summary>
-    /// Dodaje dzień wyjątkowy.
-    /// Tylko dla administratora.
+    /// Dodaje dzień wyjątkowy. Tylko dla administratora.
     /// </summary>
     [HttpPost("exceptions")]
+    [ProducesResponseType<ExceptionDayMutationResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> CreateExceptionDay([FromBody] CreateExceptionDayDto dto)
     {
         int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await _context.IsAdminAsync(userId))
         {
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                Message = "Tylko administrator może zarządzać dniami wyjątkowymi"
-            });
+            return this.Create(StatusCodes.Status403Forbidden, "Tylko administrator może zarządzać dniami wyjątkowymi");
         }
 
         var endDate = dto.EndDate ?? dto.StartDate;
         if (endDate < dto.StartDate)
         {
-            return BadRequest(new
-            {
-                Message = "Data zakończenia musi być późniejsza lub równa dacie rozpoczęcia"
-            });
+            return this.Create(StatusCodes.Status400BadRequest, "Data zakończenia musi być późniejsza lub równa dacie rozpoczęcia");
         }
 
         var exceptionDay = new ExceptionDay
@@ -295,76 +336,70 @@ public class RecessController : ControllerBase
         await _context.SaveChangesAsync();
         NotifyScheduleUpdated();
 
-        return Ok(new
-        {
-            Message = "Pomyślnie dodano dzień wyjątkowy",
-            ExceptionDay = exceptionDay
-        });
+        return Ok(new ExceptionDayMutationResponseDto(
+            "Pomyślnie dodano dzień wyjątkowy",
+            new ExceptionDayItemDto(exceptionDay.Id, exceptionDay.StartDate, exceptionDay.EndDate, exceptionDay.DayType, exceptionDay.Description)));
     }
 
     /// <summary>
-    /// Usuwa dzień wyjątkowy o podanym identyfikatorze. 
-    /// Tylko dla administratora.
+    /// Usuwa dzień wyjątkowy o podanym identyfikatorze. Tylko dla administratora.
     /// </summary>
     [HttpDelete("exceptions/{id:int}")]
+    [ProducesResponseType<BreakMessageResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> DeleteExceptionDay(int id)
     {
         int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await _context.IsAdminAsync(userId))
         {
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                Message = "Tylko administrator może usuwać dni wyjątkowe"
-            });
+            return this.Create(StatusCodes.Status403Forbidden, "Tylko administrator może usuwać dni wyjątkowe");
         }
 
         var exceptionDay = await _context.ExceptionDays.FindAsync(id);
         if (exceptionDay == null)
         {
-            return NotFound(new { Message = "Nie znaleziono dnia wyjątkowego o podanym ID" });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono dnia wyjątkowego o podanym ID");
         }
 
         _context.ExceptionDays.Remove(exceptionDay);
         await _context.SaveChangesAsync();
         NotifyScheduleUpdated();
 
-        return Ok(new { Message = "Pomyślnie usunięto dzień wyjątkowy" });
+        return Ok(new BreakMessageResponseDto("Pomyślnie usunięto dzień wyjątkowy"));
     }
 
-
     /// <summary>
-    /// Pobiera listę zaplanowanych wyciszeń 
-    /// konkretnych przerw (ExceptionBreak).
+    /// Pobiera listę zaplanowanych wyciszeń konkretnych przerw (ExceptionBreak).
     /// </summary>
     [HttpGet("exception-breaks")]
+    [ProducesResponseType<ExceptionBreaksListResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> GetAllExceptionBreaks()
     {
         var exceptionBreaks = await _context.ExceptionBreaks
             .OrderByDescending(eb => eb.BreakDate)
             .ThenBy(eb => eb.BreakNumber)
+            .Select(eb => new ExceptionBreakItemDto(eb.Id, eb.BreakDate, eb.BreakNumber, eb.MusicEnabled, eb.Description))
             .ToListAsync();
 
-        return Ok(new
-        {
-            Message = "Lista wyciszonych przerw (wyjątków)",
-            ExceptionBreaks = exceptionBreaks
-        });
+        return Ok(new ExceptionBreaksListResponseDto("Lista wyciszonych przerw (wyjątków)", exceptionBreaks));
     }
 
     /// <summary>
-    /// Dodaje wyciszenie konkretnej przerwy.
-    /// Tylko dla administratora.
+    /// Dodaje wyciszenie konkretnej przerwy. Tylko dla administratora.
     /// </summary>
     [HttpPost("exception-breaks")]
+    [ProducesResponseType<ExceptionBreakMutationResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> CreateExceptionBreak([FromBody] CreateExceptionBreakDto dto)
     {
         int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await _context.IsAdminAsync(userId))
         {
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                Message = "Tylko administrator może zarządzać przerwami wyjątkowymi"
-            });
+            return this.Create(StatusCodes.Status403Forbidden, "Tylko administrator może zarządzać przerwami wyjątkowymi");
         }
 
         var exceptionBreak = new ExceptionBreak
@@ -379,62 +414,59 @@ public class RecessController : ControllerBase
         await _context.SaveChangesAsync();
         NotifyScheduleUpdated();
 
-        return Ok(new
-        {
-            Message = "Pomyślnie dodano przerwę z wyciszeniem muzyki",
-            ExceptionBreak = exceptionBreak
-        });
+        return Ok(new ExceptionBreakMutationResponseDto(
+            "Pomyślnie dodano przerwę z wyciszeniem muzyki",
+            new ExceptionBreakItemDto(exceptionBreak.Id, exceptionBreak.BreakDate, exceptionBreak.BreakNumber, exceptionBreak.MusicEnabled, exceptionBreak.Description)));
     }
 
     /// <summary>
-    /// Usuwa wyciszenie konkretnej przerwy.
-    /// Tylko dla administratora.
+    /// Usuwa wyciszenie konkretnej przerwy. Tylko dla administratora.
     /// </summary>
     [HttpDelete("exception-breaks/{id:int}")]
+    [ProducesResponseType<BreakMessageResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> DeleteExceptionBreak(int id)
     {
         int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await _context.IsAdminAsync(userId))
         {
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                Message = "Tylko administrator może usuwać wyjątki przerw"
-            });
+            return this.Create(StatusCodes.Status403Forbidden, "Tylko administrator może usuwać wyjątki przerw");
         }
 
         var exceptionBreak = await _context.ExceptionBreaks.FindAsync(id);
         if (exceptionBreak == null)
         {
-            return NotFound(new { Message = "Nie znaleziono wyjątku przerwy o podanym ID" });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono wyjątku przerwy o podanym ID");
         }
 
         _context.ExceptionBreaks.Remove(exceptionBreak);
         await _context.SaveChangesAsync();
         NotifyScheduleUpdated();
 
-        return Ok(new { Message = "Pomyślnie usunięto wyjątek przerwy" });
+        return Ok(new BreakMessageResponseDto("Pomyślnie usunięto wyjątek przerwy"));
     }
 
-
     /// <summary>
-    /// Pozwala administratorowi na edycję stałych godzin 
-    /// przerw w tabeli break (np. zmiana dzwonków w szkole).
+    /// Pozwala administratorowi na edycję stałych godzin przerw w tabeli break.
     /// </summary>
     [HttpPut("update-break")]
+    [ProducesResponseType<BreakMessageResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> UpdateDefaultBreaks([FromBody] List<UpdateBreakScheduleItemDto> items)
     {
         int userId = HttpContext.GetCurrentUserId() ?? 0;
         if (!await _context.IsAdminAsync(userId))
         {
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                Message = "Tylko administrator może edytować rozkład przerw"
-            });
+            return this.Create(StatusCodes.Status403Forbidden, "Tylko administrator może edytować rozkład przerw");
         }
 
         if (items == null || items.Count == 0)
         {
-            return BadRequest(new { Message = "Lista przerw nie może być pusta" });
+            return this.Create(StatusCodes.Status400BadRequest, "Lista przerw nie może być pusta");
         }
 
         var baseDate = new DateOnly(2026, 1, 1);
@@ -456,9 +488,6 @@ public class RecessController : ControllerBase
         await _context.SaveChangesAsync();
         NotifyScheduleUpdated();
 
-        return Ok(new
-        {
-            Message = "Rozkład przerw w bazie został zaktualizowany"
-        });
+        return Ok(new BreakMessageResponseDto("Rozkład przerw w bazie został zaktualizowany"));
     }
 }

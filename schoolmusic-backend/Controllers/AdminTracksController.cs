@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using schoolmusic_backend.Extensions;
 using schoolmusic_backend.Models;
+using schoolmusic_backend.Services;
 
 namespace schoolmusic_backend.Controllers;
 
@@ -65,6 +67,12 @@ public record AdminTracksPagedResponseDto(
     IReadOnlyList<AdminTrackItemDto> Items
 );
 
+public sealed record AdminTrackStatusResponseDto(
+    string Message,
+    int Id,
+    bool? IsActive = null
+);
+
 /// <summary>
 /// Kontroler API dla panelu administratora do pełnego zarządzania bazą utworów (CRUD).
 /// Umożliwia dodawanie, edycję, usuwanie, przywracanie oraz przeglądanie wszystkich utworów (w tym nieaktywnych).
@@ -72,6 +80,7 @@ public record AdminTracksPagedResponseDto(
 [Route("api/admin/tracks")]
 [ApiController]
 [Authorize(Roles = "admin,head_admin")]
+[Produces("application/json")]
 public class AdminTracksController : ControllerBase
 {
     private readonly schoolmusicContext _context;
@@ -86,6 +95,9 @@ public class AdminTracksController : ControllerBase
     /// wyszukiwania, paginacji i sortowania.
     /// </summary>
     [HttpGet]
+    [ProducesResponseType<AdminTracksPagedResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> GetAdminTracks(
         [FromQuery] string? search = null,
         [FromQuery] string? genre = null,
@@ -145,14 +157,12 @@ public class AdminTracksController : ControllerBase
 
         var songIds = songsPage.Select(s => s.Id).ToList();
 
-        // Liczba odtworzeń dla piosenek na stronie
         var playCounts = await _context.Histories
             .Where(h => songIds.Contains(h.SongId))
             .GroupBy(h => h.SongId)
             .Select(g => new { SongId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.SongId, x => x.Count);
 
-        // Liczba aktualnych głosów w aktywnej kolejce
         var queueVotes = await _context.QueueItems
             .Where(q => songIds.Contains(q.SongId) && (q.Status == "queued" || q.Status == "playing"))
             .GroupBy(q => q.SongId)
@@ -189,6 +199,10 @@ public class AdminTracksController : ControllerBase
     /// Pobiera szczegóły pojedynczego utworu dla panelu administratora (w tym utworu nieaktywnego).
     /// </summary>
     [HttpGet("{id:int}")]
+    [ProducesResponseType<AdminTrackItemDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetAdminTrackById(int id)
     {
         var song = await _context.Songs
@@ -197,7 +211,7 @@ public class AdminTracksController : ControllerBase
 
         if (song == null)
         {
-            return NotFound(new { Message = "Nie znaleziono utworu o podanym ID." });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono utworu o podanym ID.");
         }
 
         int totalPlays = await _context.Histories.CountAsync(h => h.SongId == id);
@@ -230,21 +244,44 @@ public class AdminTracksController : ControllerBase
     /// Dodaje nowy utwór do bazy. Jeśli podany wykonawca nie istnieje, zostaje automatycznie utworzony.
     /// </summary>
     [HttpPost]
+    [ProducesResponseType<AdminTrackItemDto>(StatusCodes.Status201Created)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> CreateTrack([FromBody] CreateTrackDto dto)
     {
         if (string.IsNullOrWhiteSpace(dto.Title))
         {
-            return BadRequest(new { Message = "Tytuł utworu jest wymagany." });
+            return this.Create(StatusCodes.Status400BadRequest, "Tytuł utworu jest wymagany.");
         }
 
         if (string.IsNullOrWhiteSpace(dto.ArtistName))
         {
-            return BadRequest(new { Message = "Nazwa wykonawcy jest wymagana." });
+            return this.Create(StatusCodes.Status400BadRequest, "Nazwa wykonawcy jest wymagana.");
         }
 
         if (dto.DurationMs <= 0)
         {
-            return BadRequest(new { Message = "Czas trwania utworu musi być większy od zera." });
+            return this.Create(StatusCodes.Status400BadRequest, "Czas trwania utworu musi być większy od zera.");
+        }
+
+        string? normalizedSpotifyId = string.IsNullOrWhiteSpace(dto.SpotifyId)
+            ? null
+            : SpotifyTrackImporter.NormalizeSpotifyTrackId(dto.SpotifyId);
+
+        if (normalizedSpotifyId != null)
+        {
+            var duplicateSong = await _context.Songs
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.SpotifyId == normalizedSpotifyId);
+            if (duplicateSong != null)
+            {
+                return this.Create(
+                    StatusCodes.Status409Conflict,
+                    $"Utwór o identyfikatorze Spotify '{normalizedSpotifyId}' już istnieje w bazie (ID: {duplicateSong.Id}).",
+                    extensions: new Dictionary<string, object?> { ["existingSongId"] = duplicateSong.Id });
+            }
         }
 
         var trimmedArtistName = dto.ArtistName.Trim();
@@ -271,7 +308,7 @@ public class AdminTracksController : ControllerBase
             SongUrl = string.IsNullOrWhiteSpace(dto.SongUrl) ? null : dto.SongUrl.Trim(),
             Cover = string.IsNullOrWhiteSpace(dto.Cover) ? null : dto.Cover.Trim(),
             Source = string.IsNullOrWhiteSpace(dto.Source) ? "other" : dto.Source.Trim(),
-            SpotifyId = string.IsNullOrWhiteSpace(dto.SpotifyId) ? null : dto.SpotifyId.Trim(),
+            SpotifyId = normalizedSpotifyId,
             IsActive = true,
             CreatedAt = DateTime.UtcNow
         };
@@ -303,6 +340,12 @@ public class AdminTracksController : ControllerBase
     /// Aktualizuje metadane istniejącego utworu. W razie zmiany nazwy wykonawcy, automatycznie tworzy lub łączy artystę.
     /// </summary>
     [HttpPut("{id:int}")]
+    [ProducesResponseType<AdminTrackItemDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> UpdateTrack(int id, [FromBody] UpdateTrackDto dto)
     {
         var song = await _context.Songs
@@ -311,14 +354,14 @@ public class AdminTracksController : ControllerBase
 
         if (song == null)
         {
-            return NotFound(new { Message = "Nie znaleziono utworu o podanym ID." });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono utworu o podanym ID.");
         }
 
         if (dto.Title != null)
         {
             if (string.IsNullOrWhiteSpace(dto.Title))
             {
-                return BadRequest(new { Message = "Tytuł utworu nie może być pusty." });
+                return this.Create(StatusCodes.Status400BadRequest, "Tytuł utworu nie może być pusty.");
             }
             song.Title = dto.Title.Trim();
         }
@@ -327,7 +370,7 @@ public class AdminTracksController : ControllerBase
         {
             if (string.IsNullOrWhiteSpace(dto.ArtistName))
             {
-                return BadRequest(new { Message = "Nazwa wykonawcy nie może być pusta." });
+                return this.Create(StatusCodes.Status400BadRequest, "Nazwa wykonawcy nie może być pusta.");
             }
 
             var trimmedArtistName = dto.ArtistName.Trim();
@@ -356,16 +399,39 @@ public class AdminTracksController : ControllerBase
         {
             if (dto.DurationMs.Value <= 0)
             {
-                return BadRequest(new { Message = "Czas trwania utworu musi być większy od zera." });
+                return this.Create(StatusCodes.Status400BadRequest, "Czas trwania utworu musi być większy od zera.");
             }
             song.DurationMs = dto.DurationMs.Value;
+        }
+
+        if (dto.SpotifyId != null)
+        {
+            string? normalizedSpotifyId = string.IsNullOrWhiteSpace(dto.SpotifyId)
+                ? null
+                : SpotifyTrackImporter.NormalizeSpotifyTrackId(dto.SpotifyId);
+
+            if (normalizedSpotifyId != null)
+            {
+                var conflictSongId = await _context.Songs
+                    .AsNoTracking()
+                    .Where(s => s.Id != id && s.SpotifyId == normalizedSpotifyId)
+                    .Select(s => (int?)s.Id)
+                    .FirstOrDefaultAsync();
+                if (conflictSongId.HasValue)
+                {
+                    return this.Create(
+                        StatusCodes.Status409Conflict,
+                        $"Identyfikator Spotify '{normalizedSpotifyId}' jest już przypisany do utworu ID {conflictSongId.Value}.");
+                }
+            }
+
+            song.SpotifyId = normalizedSpotifyId;
         }
 
         if (dto.Genre != null) song.Genre = string.IsNullOrWhiteSpace(dto.Genre) ? null : dto.Genre.Trim();
         if (dto.SongUrl != null) song.SongUrl = string.IsNullOrWhiteSpace(dto.SongUrl) ? null : dto.SongUrl.Trim();
         if (dto.Cover != null) song.Cover = string.IsNullOrWhiteSpace(dto.Cover) ? null : dto.Cover.Trim();
         if (dto.Source != null) song.Source = string.IsNullOrWhiteSpace(dto.Source) ? "other" : dto.Source.Trim();
-        if (dto.SpotifyId != null) song.SpotifyId = string.IsNullOrWhiteSpace(dto.SpotifyId) ? null : dto.SpotifyId.Trim();
         if (dto.IsActive.HasValue) song.IsActive = dto.IsActive.Value;
 
         await _context.SaveChangesAsync();
@@ -398,12 +464,16 @@ public class AdminTracksController : ControllerBase
     /// Jeśli utwór jest powiązany z historią lub kolejką, system zawsze wykonuje soft-delete (IsActive = false).
     /// </summary>
     [HttpDelete("{id:int}")]
+    [ProducesResponseType<AdminTrackStatusResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> DeleteTrack(int id, [FromQuery] bool hardDelete = false)
     {
         var song = await _context.Songs.FirstOrDefaultAsync(s => s.Id == id);
         if (song == null)
         {
-            return NotFound(new { Message = "Nie znaleziono utworu o podanym ID." });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono utworu o podanym ID.");
         }
 
         bool hasReferences = await _context.QueueItems.AnyAsync(q => q.SongId == id)
@@ -414,44 +484,45 @@ public class AdminTracksController : ControllerBase
         {
             _context.Songs.Remove(song);
             await _context.SaveChangesAsync();
-            return Ok(new
-            {
-                Message = "Utwór został trwale usunięty z bazy danych.",
-                Id = id
-            });
+            return Ok(new AdminTrackStatusResponseDto(
+                Message: "Utwór został trwale usunięty z bazy danych.",
+                Id: id
+            ));
         }
 
         song.IsActive = false;
         await _context.SaveChangesAsync();
 
-        return Ok(new
-        {
-            Message = "Utwór został pomyślnie dezaktywowany (soft-delete).",
-            Id = id,
-            IsActive = false
-        });
+        return Ok(new AdminTrackStatusResponseDto(
+            Message: "Utwór został pomyślnie dezaktywowany (soft-delete).",
+            Id: id,
+            IsActive: false
+        ));
     }
 
     /// <summary>
     /// Przywraca wcześniej dezaktywowany utwór (IsActive = true).
     /// </summary>
     [HttpPost("{id:int}/restore")]
+    [ProducesResponseType<AdminTrackStatusResponseDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> RestoreTrack(int id)
     {
         var song = await _context.Songs.FirstOrDefaultAsync(s => s.Id == id);
         if (song == null)
         {
-            return NotFound(new { Message = "Nie znaleziono utworu o podanym ID." });
+            return this.Create(StatusCodes.Status404NotFound, "Nie znaleziono utworu o podanym ID.");
         }
 
         song.IsActive = true;
         await _context.SaveChangesAsync();
 
-        return Ok(new
-        {
-            Message = "Utwór został pomyślnie przywrócony.",
-            Id = id,
-            IsActive = true
-        });
+        return Ok(new AdminTrackStatusResponseDto(
+            Message: "Utwór został pomyślnie przywrócony.",
+            Id: id,
+            IsActive: true
+        ));
     }
 }

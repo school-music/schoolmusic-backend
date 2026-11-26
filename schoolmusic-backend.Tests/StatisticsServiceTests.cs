@@ -596,9 +596,10 @@ public class StatisticsServiceTests
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, objectResult.StatusCode);
         Assert.Equal("15", controller.Response.Headers.RetryAfter.ToString());
 
-        var body = objectResult.Value;
-        Assert.NotNull(body);
-        var isAvailableProp = body.GetType().GetProperty("IsAvailable")?.GetValue(body);
-        Assert.Equal(false, isAvailableProp);
+        var problem = Assert.IsType<ProblemDetails>(objectResult.Value);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, problem.Status);
+        Assert.Equal(false, problem.Extensions["isAvailable"]);
+        Assert.Equal(15, problem.Extensions["retryAfter"]);
+        Assert.Equal(problem.Detail, problem.Extensions["message"]);
     }
 }

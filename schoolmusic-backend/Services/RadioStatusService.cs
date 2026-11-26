@@ -3,14 +3,67 @@ using schoolmusic_backend.Models;
 
 namespace schoolmusic_backend.Services
 {
+    public sealed record RadioCurrentTrackDto(
+        int QueueItemId,
+        int SongId,
+        string Title,
+        int ArtistId,
+        string ArtistName,
+        string? Cover,
+        int DurationMs,
+        string? Genre,
+        string Source,
+        string? SongUrl,
+        string? SpotifyId,
+        int VotesCount,
+        string SubmittedBy
+    );
+
+    public sealed record RadioUpcomingLeadTrackDto(
+        int QueueItemId,
+        int SongId,
+        string Title,
+        int ArtistId,
+        string ArtistName,
+        string? Cover,
+        int DurationMs,
+        string? Genre,
+        string Source,
+        string? SongUrl,
+        string? SpotifyId,
+        int VotesCount
+    );
+
+    public sealed record RadioBreakInfoDto(
+        int? BreakId = null,
+        int? BreakNumber = null,
+        DateTime? EndsAt = null,
+        int? SecondsRemaining = null,
+        int? NextBreakId = null,
+        int? NextBreakNumber = null,
+        DateTime? StartsAt = null,
+        int? StartsInMinutes = null,
+        RadioUpcomingLeadTrackDto? LeadingSong = null
+    );
+
+    public sealed record RadioNowPlayingResponseDto(
+        bool IsPlaying,
+        bool IsMuted,
+        string? Reason,
+        string Message,
+        RadioCurrentTrackDto? CurrentTrack,
+        RadioBreakInfoDto? BreakInfo
+    );
+
     public interface IRadioStatusService
     {
         Task<object> GetNowPlayingAsync();
+        Task<RadioNowPlayingResponseDto> GetNowPlayingDtoAsync();
     }
 
     /// <summary>
     /// Udostępnia aktualny stan radiowęzła — informację czy odtwarzane jest nagranie, czy radiowęzeł jest wyciszony,
-    /// bieżący utwór oraz dane o trwającej lub nadchodzącej przerwie.
+    /// bieżący utwór wraz z metadanymi Spotify oraz dane o trwającej lub nadchodzącej przerwie.
     /// </summary>
     public class RadioStatusService : IRadioStatusService
     {
@@ -23,37 +76,28 @@ namespace schoolmusic_backend.Services
             _timeProvider = timeProvider ?? TimeProvider.System;
         }
 
-        /// <summary>
-        /// Zwraca aktualny stan odtwarzania radiowęzła: czy odtwarzanie trwa, czy jest wyciszone, komunikat, dane
-        /// aktualnego utworu oraz informacje o trwającej lub nadchodzącej przerwie.
-        /// </summary>
-        /// <returns>Task zawierający anonimowy obiekt z polami: isPlaying (bool), isMuted (bool), message (string), currentTrack
-        /// (obiekt z danymi utworu lub null), breakInfo (obiekt z informacjami o przerwie lub null). W przypadku dni
-        /// wyjątkowych lub wyciszonych przerw obiekt może dodatkowo zawierać pole reason z opisem powodu.</returns>
-        public async Task<object> GetNowPlayingAsync()
+        public async Task<object> GetNowPlayingAsync() => await GetNowPlayingDtoAsync();
+
+        public async Task<RadioNowPlayingResponseDto> GetNowPlayingDtoAsync()
         {
             var now = _timeProvider.GetLocalNow().DateTime;
             var today = DateOnly.FromDateTime(now);
 
-            // Sprawdzenie dnia wyjątkowego (np. żałoba, dzień bez muzyki)
             var activeExceptionDay = await _context.ExceptionDays
                 .Where(e => e.StartDate <= today && today <= e.EndDate)
                 .FirstOrDefaultAsync();
 
             if (activeExceptionDay != null)
             {
-                return new
-                {
-                    isPlaying = false,
-                    isMuted = true,
-                    reason = activeExceptionDay.Description,
-                    message = $"Radiowęzeł wyłączony: {activeExceptionDay.Description}.",
-                    currentTrack = (object?)null,
-                    breakInfo = (object?)null
-                };
+                return new RadioNowPlayingResponseDto(
+                    IsPlaying: false,
+                    IsMuted: true,
+                    Reason: activeExceptionDay.Description,
+                    Message: $"Radiowęzeł wyłączony: {activeExceptionDay.Description}.",
+                    CurrentTrack: null,
+                    BreakInfo: null);
             }
 
-            // Pobranie harmonogramu przerw na dziś
             var allBreaks = await _context.Breaks.OrderBy(b => b.BreakNumber).ToListAsync();
 
             var todayBreaks = allBreaks.Select(b => new
@@ -66,7 +110,6 @@ namespace schoolmusic_backend.Services
             var currentBreak = todayBreaks.FirstOrDefault(b => now >= b.StartAt && now <= b.EndsAt);
             var nextBreak = todayBreaks.Where(b => b.StartAt > now).OrderBy(b => b.StartAt).FirstOrDefault();
 
-            // Sprawdzenie czy muzyka jest włączona na bieżącej przerwie wg hierarchii priorytetów
             bool isMusicAllowed = true;
             string? muteReason = null;
 
@@ -124,26 +167,23 @@ namespace schoolmusic_backend.Services
                 }
             }
 
-            // Jeśli trwa przerwa
             if (currentBreak != null)
             {
+                var breakInfo = new RadioBreakInfoDto(
+                    BreakId: currentBreak.Entity.Id,
+                    BreakNumber: currentBreak.Entity.BreakNumber,
+                    EndsAt: currentBreak.EndsAt,
+                    SecondsRemaining: Math.Max(0, (int)(currentBreak.EndsAt - now).TotalSeconds));
+
                 if (!isMusicAllowed)
                 {
-                    return new
-                    {
-                        isPlaying = false,
-                        isMuted = true,
-                        reason = muteReason,
-                        message = $"Trwa przerwa nr {currentBreak.Entity.BreakNumber}, ale muzyka jest wyłączona ({muteReason}).",
-                        currentTrack = (object?)null,
-                        breakInfo = new
-                        {
-                            breakId = currentBreak.Entity.Id,
-                            breakNumber = currentBreak.Entity.BreakNumber,
-                            endsAt = currentBreak.EndsAt,
-                            secondsRemaining = (int)(currentBreak.EndsAt - now).TotalSeconds
-                        }
-                    };
+                    return new RadioNowPlayingResponseDto(
+                        IsPlaying: false,
+                        IsMuted: true,
+                        Reason: muteReason,
+                        Message: $"Trwa przerwa nr {currentBreak.Entity.BreakNumber}, ale muzyka jest wyłączona ({muteReason}).",
+                        CurrentTrack: null,
+                        BreakInfo: breakInfo);
                 }
 
                 var topTrack = await _context.QueueItems
@@ -156,36 +196,31 @@ namespace schoolmusic_backend.Services
                     .ThenBy(q => q.OrderIndex)
                     .FirstOrDefaultAsync();
 
-                return new
-                {
-                    isPlaying = topTrack != null,
-                    isMuted = false,
-                    message = topTrack != null
+                return new RadioNowPlayingResponseDto(
+                    IsPlaying: topTrack != null,
+                    IsMuted: false,
+                    Reason: null,
+                    Message: topTrack != null
                         ? $"Trwa odtwarzanie na przerwie nr {currentBreak.Entity.BreakNumber}"
                         : "Trwa przerwa, ale kolejka utworów jest pusta.",
-                    currentTrack = topTrack == null ? null : new
-                    {
-                        queueItemId = topTrack.Id,
-                        songId = topTrack.SongId,
-                        title = topTrack.Song.Title,
-                        artistName = topTrack.Song.Artist?.Name ?? "Nieznany wykonawca",
-                        cover = topTrack.Song.Cover,
-                        durationMs = topTrack.Song.DurationMs,
-                        votesCount = topTrack.Votes.Count,
-                        submittedBy = topTrack.User?.UserLogin ?? "Uczeń"
-                    },
-                    breakInfo = new
-                    {
-                        breakId = currentBreak.Entity.Id,
-                        breakNumber = currentBreak.Entity.BreakNumber,
-                        endsAt = currentBreak.EndsAt,
-                        secondsRemaining = (int)(currentBreak.EndsAt - now).TotalSeconds
-                    }
-                };
+                    CurrentTrack: topTrack == null ? null : new RadioCurrentTrackDto(
+                        QueueItemId: topTrack.Id,
+                        SongId: topTrack.SongId,
+                        Title: topTrack.Song.Title,
+                        ArtistId: topTrack.Song.ArtistId,
+                        ArtistName: topTrack.Song.Artist?.Name ?? "Nieznany wykonawca",
+                        Cover: topTrack.Song.Cover,
+                        DurationMs: topTrack.Song.DurationMs,
+                        Genre: topTrack.Song.Genre,
+                        Source: topTrack.Song.Source,
+                        SongUrl: topTrack.Song.SongUrl,
+                        SpotifyId: topTrack.Song.SpotifyId,
+                        VotesCount: topTrack.Votes.Count,
+                        SubmittedBy: topTrack.User?.UserLogin ?? "Uczeń"),
+                    BreakInfo: breakInfo);
             }
 
-            // Jeśli trwają lekcje (oczekiwanie na kolejną przerwę)
-            object? upcomingLeadTrack = null;
+            RadioUpcomingLeadTrackDto? upcomingLeadTrack = null;
             if (nextBreak != null)
             {
                 var leadingTrack = await _context.QueueItems
@@ -200,36 +235,36 @@ namespace schoolmusic_backend.Services
 
                 if (leadingTrack != null)
                 {
-                    upcomingLeadTrack = new
-                    {
-                        queueItemId = leadingTrack.Id,
-                        songId = leadingTrack.SongId,
-                        title = leadingTrack.Song.Title,
-                        artistName = leadingTrack.Song.Artist?.Name ?? "Nieznany wykonawca",
-                        cover = leadingTrack.Song.Cover,
-                        durationMs = leadingTrack.Song.DurationMs,
-                        votesCount = leadingTrack.Votes.Count
-                    };
+                    upcomingLeadTrack = new RadioUpcomingLeadTrackDto(
+                        QueueItemId: leadingTrack.Id,
+                        SongId: leadingTrack.SongId,
+                        Title: leadingTrack.Song.Title,
+                        ArtistId: leadingTrack.Song.ArtistId,
+                        ArtistName: leadingTrack.Song.Artist?.Name ?? "Nieznany wykonawca",
+                        Cover: leadingTrack.Song.Cover,
+                        DurationMs: leadingTrack.Song.DurationMs,
+                        Genre: leadingTrack.Song.Genre,
+                        Source: leadingTrack.Song.Source,
+                        SongUrl: leadingTrack.Song.SongUrl,
+                        SpotifyId: leadingTrack.Song.SpotifyId,
+                        VotesCount: leadingTrack.Votes.Count);
                 }
             }
 
-            return new
-            {
-                isPlaying = false,
-                isMuted = false,
-                message = nextBreak != null
+            return new RadioNowPlayingResponseDto(
+                IsPlaying: false,
+                IsMuted: false,
+                Reason: null,
+                Message: nextBreak != null
                     ? $"Trwają lekcje. Kolejna przerwa (nr {nextBreak.Entity.BreakNumber}) rozpocznie się o {nextBreak.StartAt:HH:mm}."
                     : "Wszystkie przerwy na dziś dobiegły końca.",
-                currentTrack = (object?)null,
-                breakInfo = nextBreak == null ? null : new
-                {
-                    nextBreakId = nextBreak.Entity.Id,
-                    nextBreakNumber = nextBreak.Entity.BreakNumber,
-                    startsAt = nextBreak.StartAt,
-                    startsInMinutes = (int)Math.Max(0, (nextBreak.StartAt - now).TotalMinutes),
-                    leadingSong = upcomingLeadTrack
-                }
-            };
+                CurrentTrack: null,
+                BreakInfo: nextBreak == null ? null : new RadioBreakInfoDto(
+                    NextBreakId: nextBreak.Entity.Id,
+                    NextBreakNumber: nextBreak.Entity.BreakNumber,
+                    StartsAt: nextBreak.StartAt,
+                    StartsInMinutes: (int)Math.Max(0, (nextBreak.StartAt - now).TotalMinutes),
+                    LeadingSong: upcomingLeadTrack));
         }
     }
 }
