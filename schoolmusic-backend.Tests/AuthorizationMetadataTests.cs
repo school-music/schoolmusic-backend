@@ -38,6 +38,8 @@ public sealed class AuthorizationMetadataTests
         "GET api/tracks/genres",
         "GET api/tracks/search",
         "GET api/tracks/{id:int}",
+        "GET reset-password",
+        "GET verify-email",
         "POST api/auth/email/resend",
         "POST api/auth/email/verify",
         "POST api/auth/ldap/login",
@@ -46,7 +48,9 @@ public sealed class AuthorizationMetadataTests
         "POST api/auth/password-recovery/request",
         "POST api/auth/refresh",
         "POST api/auth/register",
-        "POST api/auth/school/login"
+        "POST api/auth/school/login",
+        "POST reset-password",
+        "POST verify-email"
     };
 
     [Fact]

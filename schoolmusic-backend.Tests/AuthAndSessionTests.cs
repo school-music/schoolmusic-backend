@@ -553,4 +553,217 @@ public sealed class AuthAndSessionTests
         await ReadProblemAsync(await targetClient.GetAsync("/api/users"), HttpStatusCode.Forbidden);
         await ReadProblemAsync(await targetClient.GetAsync("/api/statistics/dashboard"), HttpStatusCode.Forbidden);
     }
+
+    [Fact]
+    public async Task Sessions_FamilyIdIsGuidAndPersistsAcrossRotationAndReuseRevocation()
+    {
+        using var factory = new TestWebApplicationFactory();
+        var user = await factory.SeedUserAsync("guid_student", "StrongPassword123!", rankId: 1);
+        using var client = factory.CreateClient();
+
+        var loginResp = await client.PostAsJsonAsync("/api/auth/login", new
+        {
+            name = user.UserLogin,
+            password = "StrongPassword123!"
+        });
+        loginResp.EnsureSuccessStatusCode();
+        var loginDto = await loginResp.Content.ReadFromJsonAsync<UsersController.LoginResponseDto>();
+        Assert.NotNull(loginDto?.refreshToken);
+
+        Guid originalFamilyId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+            var initialToken = await db.RefreshTokens.SingleAsync(rt => rt.UserId == user.Id);
+            Assert.NotEqual(Guid.Empty, initialToken.FamilyId);
+            originalFamilyId = initialToken.FamilyId;
+        }
+
+        var refreshResp = await client.PostAsJsonAsync("/api/auth/refresh", new { refreshToken = loginDto.refreshToken });
+        refreshResp.EnsureSuccessStatusCode();
+        var rotatedDto = await refreshResp.Content.ReadFromJsonAsync<UsersController.LoginResponseDto>();
+        Assert.NotNull(rotatedDto?.refreshToken);
+        Assert.NotEqual(loginDto.refreshToken, rotatedDto.refreshToken);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+            var familyTokens = await db.RefreshTokens
+                .Where(rt => rt.UserId == user.Id)
+                .OrderBy(rt => rt.Id)
+                .ToListAsync();
+            Assert.Equal(2, familyTokens.Count);
+            Assert.All(familyTokens, rt => Assert.Equal(originalFamilyId, rt.FamilyId));
+            Assert.NotNull(familyTokens[0].RevokedAt);
+            Assert.Equal(familyTokens[1].Id, familyTokens[0].ReplacedById);
+            Assert.Null(familyTokens[1].RevokedAt);
+        }
+
+        var reuseResp = await client.PostAsJsonAsync("/api/auth/refresh", new { refreshToken = loginDto.refreshToken });
+        await ReadProblemAsync(reuseResp, HttpStatusCode.Unauthorized);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<schoolmusicContext>();
+            var familyTokens = await db.RefreshTokens.Where(rt => rt.FamilyId == originalFamilyId).ToListAsync();
+            Assert.All(familyTokens, rt => Assert.NotNull(rt.RevokedAt));
+        }
+    }
+
+    [Fact]
+    public async Task AuthPages_VerifyEmailGetDoesNotConsumeToken_AndPostVerifiesEmail()
+    {
+        using var factory = new TestWebApplicationFactory
+        {
+            ExtraConfiguration = new Dictionary<string, string?>
+            {
+                ["Auth:MobileEmailVerificationUrlTemplate"] = "schoolmusic://verify-email?token={token}"
+            }
+        };
+        await factory.SeedRanksAsync();
+        using var client = factory.CreateClient();
+
+        var registerResp = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            name = "html_verify_user",
+            password = "StrongPassword123!",
+            email = "html.verify@school.pl"
+        });
+        Assert.Equal(HttpStatusCode.Created, registerResp.StatusCode);
+
+        var sentEmail = Assert.Single(factory.EmailSink.GetMessages());
+        var token = ExtractTokenFromActionUrl(sentEmail.ActionUrl);
+
+        // GET /verify-email nie może zwracać 401 ani zużywać tokenu (ochrona przed skanerami e-maili)
+        var getPageResp = await client.GetAsync($"/verify-email?token={Uri.EscapeDataString(token)}");
+        Assert.Equal(HttpStatusCode.OK, getPageResp.StatusCode);
+        Assert.Equal("text/html", getPageResp.Content.Headers.ContentType?.MediaType);
+        Assert.True(getPageResp.Headers.CacheControl?.NoStore);
+        var getHtml = await getPageResp.Content.ReadAsStringAsync();
+        Assert.Contains($"value=\"{WebUtility.HtmlEncode(token)}\"", getHtml);
+        Assert.Contains($"schoolmusic://verify-email?token={Uri.EscapeDataString(token)}", getHtml);
+
+        // POST /verify-email potwierdza weryfikację, a ponowne użycie kończy się 400 HTML
+        var postVerifyResp = await client.PostAsync("/verify-email", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["token"] = token
+        }));
+        Assert.Equal(HttpStatusCode.OK, postVerifyResp.StatusCode);
+        Assert.Equal("text/html", postVerifyResp.Content.Headers.ContentType?.MediaType);
+        var verifiedHtml = await postVerifyResp.Content.ReadAsStringAsync();
+        Assert.Contains("html.verify@school.pl", verifiedHtml);
+
+        var replayResp = await client.PostAsync("/verify-email", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["token"] = token
+        }));
+        Assert.Equal(HttpStatusCode.BadRequest, replayResp.StatusCode);
+        Assert.Equal("text/html", replayResp.Content.Headers.ContentType?.MediaType);
+
+        // Po weryfikacji przez stronę HTML logowanie adresem e-mail działa
+        var emailLoginResp = await client.PostAsJsonAsync("/api/auth/login", new
+        {
+            name = "html.verify@school.pl",
+            password = "StrongPassword123!"
+        });
+        emailLoginResp.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task AuthPages_ResetPasswordGetAndPost_ValidatesInputResetsPasswordAndBlocksUnsafeSchemes()
+    {
+        using var factory = new TestWebApplicationFactory
+        {
+            ExtraConfiguration = new Dictionary<string, string?>
+            {
+                ["Auth:MobilePasswordResetUrlTemplate"] = "javascript:alert(1)"
+            }
+        };
+        var user = await factory.SeedUserAsync(
+            "html_reset_user",
+            "OldPassword123!",
+            rankId: 1,
+            email: "html.reset@school.pl",
+            emailVerified: true);
+        using var client = factory.CreateClient();
+
+        // Zaloguj się przed resetem, aby zweryfikować późniejsze unieważnienie sesji
+        var initialLogin = await (await client.PostAsJsonAsync("/api/auth/login", new
+        {
+            name = user.UserLogin,
+            password = "OldPassword123!"
+        })).Content.ReadFromJsonAsync<UsersController.LoginResponseDto>();
+        Assert.NotNull(initialLogin?.refreshToken);
+
+        var reqResp = await client.PostAsJsonAsync("/api/auth/password-recovery/request", new
+        {
+            identifier = "html.reset@school.pl"
+        });
+        Assert.Equal(HttpStatusCode.Accepted, reqResp.StatusCode);
+
+        var sentEmail = Assert.Single(factory.EmailSink.GetMessages());
+        var token = ExtractTokenFromActionUrl(sentEmail.ActionUrl);
+
+        // GET /reset-password jest publiczny (200 HTML), pokazuje token i blokuje niebezpieczny schemat javascript:
+        var getResp = await client.GetAsync($"/reset-password?token={Uri.EscapeDataString(token)}");
+        Assert.Equal(HttpStatusCode.OK, getResp.StatusCode);
+        Assert.Equal("text/html", getResp.Content.Headers.ContentType?.MediaType);
+        var getHtml = await getResp.Content.ReadAsStringAsync();
+        Assert.Contains($"value=\"{WebUtility.HtmlEncode(token)}\"", getHtml);
+        Assert.DoesNotContain("javascript:", getHtml, StringComparison.OrdinalIgnoreCase);
+
+        // Niezgodne hasła -> 400 HTML z zachowanym tokenem, bez zużycia tokenu
+        var mismatchResp = await client.PostAsync("/reset-password", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["token"] = token,
+            ["newPassword"] = "NewPassword123!",
+            ["confirmPassword"] = "DifferentPassword123!"
+        }));
+        Assert.Equal(HttpStatusCode.BadRequest, mismatchResp.StatusCode);
+        var mismatchHtml = await mismatchResp.Content.ReadAsStringAsync();
+        Assert.Contains($"value=\"{WebUtility.HtmlEncode(token)}\"", mismatchHtml);
+        Assert.DoesNotContain("NewPassword123!", mismatchHtml);
+
+        // Poprawne wysłanie formularza zmienia hasło i unieważnia poprzedni refresh token
+        var resetOkResp = await client.PostAsync("/reset-password", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["token"] = token,
+            ["newPassword"] = "BrandNewPass123!",
+            ["confirmPassword"] = "BrandNewPass123!"
+        }));
+        Assert.Equal(HttpStatusCode.OK, resetOkResp.StatusCode);
+        Assert.Equal("text/html", resetOkResp.Content.Headers.ContentType?.MediaType);
+
+        await ReadProblemAsync(
+            await client.PostAsJsonAsync("/api/auth/refresh", new { refreshToken = initialLogin.refreshToken }),
+            HttpStatusCode.Unauthorized);
+
+        var newLoginResp = await client.PostAsJsonAsync("/api/auth/login", new
+        {
+            name = user.UserLogin,
+            password = "BrandNewPass123!"
+        });
+        newLoginResp.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task AuthPages_WithoutToken_Return200FormOnGetAnd400OnEmptyPost()
+    {
+        using var factory = new TestWebApplicationFactory();
+        using var client = factory.CreateClient();
+
+        var verifyGet = await client.GetAsync("/verify-email");
+        Assert.Equal(HttpStatusCode.OK, verifyGet.StatusCode);
+        Assert.Equal("text/html", verifyGet.Content.Headers.ContentType?.MediaType);
+
+        var resetGet = await client.GetAsync("/reset-password");
+        Assert.Equal(HttpStatusCode.OK, resetGet.StatusCode);
+        Assert.Equal("text/html", resetGet.Content.Headers.ContentType?.MediaType);
+
+        var verifyPost = await client.PostAsync("/verify-email", new FormUrlEncodedContent(new Dictionary<string, string>()));
+        Assert.Equal(HttpStatusCode.BadRequest, verifyPost.StatusCode);
+
+        var resetPost = await client.PostAsync("/reset-password", new FormUrlEncodedContent(new Dictionary<string, string>()));
+        Assert.Equal(HttpStatusCode.BadRequest, resetPost.StatusCode);
+    }
 }

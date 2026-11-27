@@ -46,7 +46,7 @@ public sealed class SessionTokenService(
         {
             UserId = user.Id,
             TokenHash = TokenHashing.HashToken(rawRefreshToken),
-            FamilyId = Guid.NewGuid().ToString(),
+            FamilyId = Guid.NewGuid(),
             ExpiresAt = refreshExpiresAt,
             CreatedAt = utcNow
         };
@@ -165,7 +165,7 @@ public sealed class SessionTokenService(
         await securityStampService.InvalidateUserAsync(user.Id, cancellationToken);
     }
 
-    private async Task RevokeFamilyAndBumpVersionAsync(User user, string familyId, DateTime utcNow, CancellationToken cancellationToken)
+    private async Task RevokeFamilyAndBumpVersionAsync(User user, Guid familyId, DateTime utcNow, CancellationToken cancellationToken)
     {
         user.TokenVersion += 1;
         var familyTokens = await context.RefreshTokens

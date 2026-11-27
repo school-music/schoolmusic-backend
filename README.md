@@ -194,7 +194,11 @@ Konfiguracja aplikacji zarządzana jest przez zmienne środowiskowe (zgodnie ze 
 | `Jwt__RefreshTokenExpirationDays` | `7` | Czas ważności rotowanego tokenu odświeżania sesji w dniach |
 | `Auth__AllowLocalRegistration` | `false` | Publiczna rejestracja kont lokalnych (włączana tylko w profilu demo) |
 | `Auth__EmailLoginEnabled` | `true` | Obsługa zweryfikowanych adresów e-mail do logowania i samodzielnego resetu hasła |
-| `Auth__PublicBaseUrl` | `http://localhost:8080` | Publiczny bazowy URL używany w linkach weryfikacji i resetu hasła |
+| `Auth__PublicBaseUrl` | `http://localhost:8080` | Publiczny bazowy URL używany w linkach weryfikacji i resetu hasła (na produkcji docelowy host HTTPS) |
+| `Auth__PasswordResetUrlTemplate` | `{baseUrl}/reset-password?token={token}` | Szablon URL linku resetu hasła wysyłanego e-mailem |
+| `Auth__EmailVerificationUrlTemplate` | `{baseUrl}/verify-email?token={token}` | Szablon URL linku weryfikacji e-maila wysyłanego e-mailem |
+| `Auth__MobilePasswordResetUrlTemplate` | *(puste)* | Opcjonalny deep link aplikacji mobilnej na stronie `/reset-password` (np. `schoolmusic://reset-password?token={token}`) |
+| `Auth__MobileEmailVerificationUrlTemplate` | *(puste)* | Opcjonalny deep link aplikacji mobilnej na stronie `/verify-email` (np. `schoolmusic://verify-email?token={token}`) |
 | `Smtp__Enabled` | `false` | Włącza wysyłkę wiadomości e-mail przez serwer SMTP na produkcji |
 | `Smtp__Host` | *(opcjonalne)* | Adres hosta serwera SMTP (wymagany przy `Smtp:Enabled=true`) |
 | `Scheduler__Enabled` | `true` | Czy ta instancja steruje automatycznym odtwarzaniem; tylko jedna instancja może mieć `true` |

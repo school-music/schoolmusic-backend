@@ -22,9 +22,8 @@ public partial class RefreshToken
     [StringLength(64)]
     public string TokenHash { get; set; } = null!;
 
-    [Column("family_id")]
-    [StringLength(36)]
-    public string FamilyId { get; set; } = null!;
+    [Column("family_id", TypeName = "char(36)")]
+    public Guid FamilyId { get; set; }
 
     [Column("expires_at", TypeName = "datetime")]
     public DateTime ExpiresAt { get; set; }

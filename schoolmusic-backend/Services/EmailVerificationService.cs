@@ -235,18 +235,10 @@ public sealed class EmailVerificationService(
 
         await context.SaveChangesAsync(cancellationToken);
 
-        var url = BuildActionUrl(_authOptions.EmailVerificationUrlTemplate, rawToken);
+        var url = _authOptions.BuildEmailVerificationUrl(rawToken);
         var text = $"Potwierdź adres e-mail w SchoolMusic, otwierając jednorazowy link (ważny do {expiresAt:u}): {url}";
         var html = $"<p>Potwierdź adres e-mail w SchoolMusic, klikając jednorazowy link:</p><p><a href=\"{System.Net.WebUtility.HtmlEncode(url)}\">{System.Net.WebUtility.HtmlEncode(url)}</a></p>";
 
         await emailSender.SendAsync(normalizedEmail, "SchoolMusic — weryfikacja adresu e-mail", text, html, url, cancellationToken);
-    }
-
-    private string BuildActionUrl(string template, string rawToken)
-    {
-        var baseUrl = (_authOptions.PublicBaseUrl ?? "http://localhost:8080").TrimEnd('/');
-        return template
-            .Replace("{baseUrl}", baseUrl, StringComparison.Ordinal)
-            .Replace("{token}", Uri.EscapeDataString(rawToken), StringComparison.Ordinal);
     }
 }

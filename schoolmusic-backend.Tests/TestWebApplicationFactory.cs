@@ -169,6 +169,7 @@ public sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
 
     public int AuthLoginPermitLimit { get; init; } = 100;
     public int AuthRecoveryPermitLimit { get; init; } = 100;
+    public IReadOnlyDictionary<string, string?>? ExtraConfiguration { get; init; }
 
     public TestWebApplicationFactory()
     {
@@ -216,6 +217,11 @@ public sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
                 ["Audio:LibVlcOutput"] = "dummy",
                 ["School:TimeZone"] = "Europe/Warsaw"
             });
+
+            if (ExtraConfiguration is { Count: > 0 })
+            {
+                configBuilder.AddInMemoryCollection(ExtraConfiguration);
+            }
         });
 
         builder.ConfigureTestServices(services =>

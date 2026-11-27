@@ -72,4 +72,67 @@ callback_code="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${API
 echo "  GET /api/spotify-playback/callback -> HTTP ${callback_code}"
 test "${callback_code}" = "400"
 
+for auth_page in "/reset-password?token=smoke-check" "/verify-email?token=smoke-check"; do
+  page_code="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${API_PORT}${auth_page}")"
+  echo "  GET ${auth_page} -> HTTP ${page_code}"
+  test "${page_code}" = "200"
+done
+
+echo "[verify-compose] Verifying MariaDB login, refresh rotation, reuse detection, and logout..."
+extract_json_field() {
+  printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+login_json="$(curl -fsS -X POST "http://127.0.0.1:${API_PORT}/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"uczen","password":"Uczen123!"}')"
+refresh_token_1="$(extract_json_field "${login_json}" "refreshToken")"
+test -n "${refresh_token_1}"
+
+refresh_json="$(curl -fsS -X POST "http://127.0.0.1:${API_PORT}/api/auth/refresh" \
+  -H "Content-Type: application/json" \
+  -d "{\"refreshToken\":\"${refresh_token_1}\"}")"
+refresh_token_2="$(extract_json_field "${refresh_json}" "refreshToken")"
+test -n "${refresh_token_2}"
+test "${refresh_token_1}" != "${refresh_token_2}"
+echo "  POST /api/auth/refresh -> HTTP 200 (rotated token)"
+
+reuse_code="$(curl -sS -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${API_PORT}/api/auth/refresh" \
+  -H "Content-Type: application/json" \
+  -d "{\"refreshToken\":\"${refresh_token_1}\"}")"
+echo "  POST /api/auth/refresh (reused old token) -> HTTP ${reuse_code}"
+test "${reuse_code}" = "401"
+
+revoked_family_code="$(curl -sS -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${API_PORT}/api/auth/refresh" \
+  -H "Content-Type: application/json" \
+  -d "{\"refreshToken\":\"${refresh_token_2}\"}")"
+echo "  POST /api/auth/refresh (revoked family token) -> HTTP ${revoked_family_code}"
+test "${revoked_family_code}" = "401"
+
+login2_json="$(curl -fsS -X POST "http://127.0.0.1:${API_PORT}/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"uczen","password":"Uczen123!"}')"
+access_token_2="$(extract_json_field "${login2_json}" "jwtSecurityToken")"
+refresh_token_3="$(extract_json_field "${login2_json}" "refreshToken")"
+test -n "${access_token_2}"
+test -n "${refresh_token_3}"
+
+logout_code="$(curl -sS -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${API_PORT}/api/auth/logout" \
+  -H "Authorization: Bearer ${access_token_2}" \
+  -H "Content-Type: application/json" \
+  -d "{\"refreshToken\":\"${refresh_token_3}\"}")"
+echo "  POST /api/auth/logout -> HTTP ${logout_code}"
+test "${logout_code}" = "204"
+
+me_after_logout_code="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${API_PORT}/api/auth/me" \
+  -H "Authorization: Bearer ${access_token_2}")"
+echo "  GET /api/auth/me (after logout) -> HTTP ${me_after_logout_code}"
+test "${me_after_logout_code}" = "401"
+
+refresh_after_logout_code="$(curl -sS -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${API_PORT}/api/auth/refresh" \
+  -H "Content-Type: application/json" \
+  -d "{\"refreshToken\":\"${refresh_token_3}\"}")"
+echo "  POST /api/auth/refresh (after logout) -> HTTP ${refresh_after_logout_code}"
+test "${refresh_after_logout_code}" = "401"
+
 echo "[verify-compose] Clean-volume Docker Compose verification passed!"

@@ -247,10 +247,7 @@ public sealed class PasswordRecoveryService(
         context.PasswordResetTokens.Add(entity);
         await context.SaveChangesAsync(cancellationToken);
 
-        var baseUrl = (_authOptions.PublicBaseUrl ?? "http://localhost:8080").TrimEnd('/');
-        var resetUrl = _authOptions.PasswordResetUrlTemplate
-            .Replace("{baseUrl}", baseUrl, StringComparison.Ordinal)
-            .Replace("{token}", Uri.EscapeDataString(rawToken), StringComparison.Ordinal);
+        var resetUrl = _authOptions.BuildPasswordResetUrl(rawToken);
 
         return (entity, rawToken, expiresAt, resetUrl);
     }

@@ -323,6 +323,7 @@ public partial class schoolmusicContext : DbContext
         modelBuilder.Entity<RefreshToken>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PRIMARY");
+            entity.Property(e => e.FamilyId).HasColumnType("char(36)");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("current_timestamp()");
             entity.HasOne(d => d.User).WithMany(p => p.RefreshTokens)
                 .OnDelete(DeleteBehavior.Cascade)

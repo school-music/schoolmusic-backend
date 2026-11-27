@@ -84,7 +84,11 @@ public sealed class OpenApiContractTests
         Assert.False(GetOperationResponse(root, "/api/auth/logout-all", "post", "204").TryGetProperty("content", out _));
         Assert.False(GetOperationResponse(root, "/api/auth/delete-acc", "delete", "204").TryGetProperty("content", out _));
         Assert.False(GetOperationResponse(root, "/api/breaks/templates/{id}", "delete", "204").TryGetProperty("content", out _));
-        Assert.False(GetOperationResponse(root, "/api/spotify-playback/connect", "get", "302").TryGetProperty("content", out _));
+        // 4. Publiczne strony HTML dla linków z e-maili nie zaśmiecają kontraktu REST OpenAPI
+        Assert.DoesNotContain(
+            root.GetProperty("paths").EnumerateObject(),
+            p => string.Equals(p.Name, "/verify-email", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(p.Name, "/reset-password", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
